@@ -1,0 +1,28 @@
+name: next-prompt
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: AI-generated follow-up prompt suggestions after each turn.
+author: soymarketing
+license: MIT
+homepage: https://github.com/soymarketing/hermes-plugin-next-prompt
+tags: [desktop, productivity, composer, suggestions]
+api: dashboard/plugin_api.py
+provides_hooks:
+  - post_llm_call
+provides_tools: []
+capabilities:
+  - llm.model_override
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    description: "Enable or disable next-prompt suggestions"
+  max_context_messages:
+    type: int
+    default: 4
+    description: "Number of recent messages to include for context (2-10)"
+  cooldown_seconds:
+    type: int
+    default: 3
+    description: "Minimum seconds between suggestions to avoid spamming"
