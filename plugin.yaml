@@ -1,11 +1,12 @@
 name: next-prompt
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 api_version: 1
-description: AI-generated follow-up prompt suggestions after each turn.
+description: AI-generated follow-up prompt suggestions under the Desktop composer after each turn.
 author: soymarketing
 license: MIT
 homepage: https://github.com/soymarketing/hermes-plugin-next-prompt
+requires_hermes: ">=0.21"
 tags: [desktop, productivity, composer, suggestions]
 provides_hooks:
   - pre_llm_call

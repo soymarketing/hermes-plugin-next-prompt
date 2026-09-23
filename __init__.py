@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _TTL_SECONDS = 7 * 24 * 3600
 _MAX_STORED = 200
 _UI_PLATFORMS = frozenset({"", "desktop", "tui"})
+_AUX_TASK = "next_prompt"
 
 # ── state ────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ _suggestions_lock = threading.Lock()
 _turn_seq: Dict[str, int] = {}
 _last_suggestion_time: Dict[str, float] = {}
 _store_path: Optional[Path] = None
+_llm_task: Optional[str] = None
 _ctx = None
 
 
@@ -163,6 +165,7 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
         llm = getattr(_ctx, "llm", None)
         if llm is None:
             return
+        kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -170,6 +173,8 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             ],
             max_tokens=100,
             temperature=0.7,
+            purpose="next-prompt suggestion",
+            **kwargs,
         )
         text = _clean(getattr(result, "text", ""))
     except Exception:
@@ -219,24 +224,40 @@ def _on_post_llm_call(**kwargs) -> None:
         return
     with _suggestions_lock:
         seq = _turn_seq.get(session_id, 0)
-    # copy_context(): the thread must inherit this profile's secret/home
-    # scope, or ctx.llm fails with UnscopedSecretError.
-    ctx_copy = contextvars.copy_context()
-    threading.Thread(
-        target=ctx_copy.run,
-        args=(_generate_suggestion, session_id, seq, list(messages), settings),
-        daemon=True,
-    ).start()
+    # The worker must inherit this profile's secret/home scope, or ctx.llm
+    # fails with UnscopedSecretError.
+    _spawn(_generate_suggestion, session_id, seq, list(messages), settings)
+
+
+def _spawn(target, *args) -> None:
+    try:
+        from agent.memory_provider import spawn_context_thread
+    except ImportError:  # older hosts: same thing by hand
+        ctx_copy = contextvars.copy_context()
+        threading.Thread(target=ctx_copy.run, args=(target, *args), daemon=True).start()
+        return
+    spawn_context_thread(target, name="next-prompt", args=args).start()
 
 
 # ── registration ─────────────────────────────────────────────────────────
 
 def register(ctx):
-    global _ctx, _store_path
+    global _ctx, _store_path, _llm_task
     _ctx = ctx
     _store_path = _resolve_store_path(ctx)
     with _suggestions_lock:
         _suggestions.update(_live(_read_store()))
+    # Own auxiliary slot: runs on the main model by default, but the user can
+    # point `auxiliary.next_prompt` at a cheaper/faster model.
+    try:
+        ctx.register_auxiliary_task(
+            _AUX_TASK,
+            display_name="Next Prompt",
+            description="Suggests the follow-up prompt shown under the composer.",
+        )
+        _llm_task = _AUX_TASK
+    except (AttributeError, ValueError):
+        _llm_task = None  # older host: plain main-model call
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     logger.info("next-prompt: registered (%d saved suggestion(s))", len(_suggestions))
