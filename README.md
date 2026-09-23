@@ -24,11 +24,11 @@ Then restart Hermes Desktop and turn **Next Prompt** on in
 1. **`post_llm_call` hook** — when a turn finishes in a Desktop/TUI session,
    a background worker asks `ctx.llm` for one short follow-up (or `NULL` when
    there is nothing useful to suggest).
-2. **Stays until you act on it** — the suggestion is kept per chat and saved
-   under the profile's `plugin-data/next-prompt/`, so switching screens or
-   chats, or a backend restart, does not lose it. It goes away when you use
-   it, dismiss it, or send your own next message (`pre_llm_call`). Stale
-   suggestions expire after 7 days.
+2. **Stays until you act on it** — the suggestion is kept per chat in the
+   plugin's data directory (`ctx.state.data_dir`, under the profile's
+   `plugin-data/`), so switching screens or chats, or a backend restart, does
+   not lose it. It goes away when you use it, dismiss it, or send your own
+   next message (`pre_llm_call`). Stale suggestions expire after 7 days.
 3. **Desktop half** — reads the suggestion through the plugin's REST route
    (`ctx.rest` → `/api/plugins/next-prompt/suggestion`) and renders it in the
    `composer.underside` area.
