@@ -1,209 +1,155 @@
 /**
  * Next Prompt — desktop half.
  *
- * After a turn finishes, polls the Python backend for an AI-generated
- * follow-up suggestion and shows it as a subtle pill below the composer.
- * Click → inserts the text into the composer. Typing, switching sessions,
- * or starting a new turn dismisses it automatically.
- *
- * Lives at: $HERMES_HOME/plugins/next-prompt/desktop/plugin.js
- * (the unified-plugin path; Hermes loads it when the plugin is enabled
- * in Settings → Plugins).
+ * After a turn finishes, polls this plugin's Python backend (through
+ * `ctx.rest`, which routes to the right backend and carries auth) for an
+ * AI-generated follow-up and shows it as a subtle pill below the composer.
+ * Click → the text is placed in the composer (not sent). × → dismiss.
  */
 
-import {
-  atom,
-  cn,
-  Codicon,
-  haptic,
-  host,
-  Tip,
-  usePluginI18n,
-  useValue
-} from '@hermes/plugin-sdk'
-import { useCallback, useEffect, useRef } from 'react'
+import { atom, cn, Codicon, haptic, host, Tip, usePluginI18n, useQuery, useValue } from '@hermes/plugin-sdk'
+import { useEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'next-prompt'
 
-// ── state ────────────────────────────────────────────────────────────────
+/** Set in register(); components read it (ctx.rest is plugin-scoped). */
+let pluginCtx = null
 
-// Per-session suggestion text (null = nothing to show).
-const $suggestion = atom(null)
-// Session the suggestion belongs to.
-const $suggestionSession = atom(null)
-// Whether the user has started typing (suppresses display).
-const $dismissed = atom(false)
+/** `${storedSessionId}:${timestamp}` the user dismissed or used. */
+const $handled = atom(null)
+/** storedSessionId → last epoch ms that chat was seen working. Data fetched
+ *  before then predates the turn and waits for a fresh fetch. The backend is
+ *  the authority on "still pending" (it drops the suggestion the moment the
+ *  user sends their own message), so this only guards the local cache. */
+const busySeenAt = new Map()
+/** Epoch ms when the focused chat last went idle — drives poll cadence. */
+let idleSinceMs = 0
+let reportedError = false
 
-// ── polling ──────────────────────────────────────────────────────────────
+const FAST_POLL_MS = 2000
+const SLOW_POLL_MS = 20000
+const FAST_WINDOW_MS = 45000
 
-let pollTimer = null
-let lastPolledSession = null
-
-function startPolling() {
-  stopPolling()
-  pollTimer = setInterval(async () => {
-    const sessionId = host.state.focusedSessionId.get()
-    if (!sessionId) return
-
-    // Don't poll while the agent is busy (turn in progress).
-    const busyMap = host.state.busyBySession.get()
-    if (busyMap[sessionId]) {
-      // Agent working — clear any stale suggestion
-      $suggestion.set(null)
-      $dismissed.set(false)
-      return
-    }
-
-    // If session changed, reset
-    if (sessionId !== lastPolledSession) {
-      $suggestion.set(null)
-      $dismissed.set(false)
-      lastPolledSession = sessionId
-    }
-
-    if ($dismissed.get()) return
-
-    try {
-      const resp = await fetch(
-        `/api/plugins/next-prompt/suggestion?session_id=${encodeURIComponent(sessionId)}`
-      )
-      if (!resp.ok) return
-      const data = await resp.json()
-      if (data.suggestion && data.suggestion.text && data.suggestion.session_id === sessionId) {
-        $suggestion.set(data.suggestion.text)
-        $suggestionSession.set(sessionId)
-      } else if ($suggestionSession.get() === sessionId) {
-        // Backend cleared the suggestion
-        $suggestion.set(null)
-      }
-    } catch {
-      // Network error — ignore silently
-    }
-  }, 2000) // Poll every 2 seconds
+// ── composer insertion ───────────────────────────────────────────────────
+// The SDK has no public "insert into composer" door yet. The composer listens
+// on a window event bus (app/chat/composer/focus.ts); target the visible one.
+function visibleComposerTarget() {
+  if (typeof document === 'undefined') return null
+  const surfaces = Array.from(document.querySelectorAll('[data-composer-target]'))
+  const visible = surfaces.find(el => !el.closest('[data-pane-hidden]')) || surfaces[0]
+  return visible ? visible.getAttribute('data-composer-target') : null
 }
 
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+function insertIntoComposer(text) {
+  const target = visibleComposerTarget()
+  if (!target) return false
+  window.dispatchEvent(new CustomEvent('hermes:composer-insert', { detail: { mode: 'block', target, text } }))
+  window.setTimeout(
+    () => window.dispatchEvent(new CustomEvent('hermes:composer-focus', { detail: { target } })),
+    0
+  )
+  return true
 }
 
-async function dismissOnServer(sessionId) {
-  if (!sessionId) return
-  try {
-    await fetch(
-      `/api/plugins/next-prompt/dismiss?session_id=${encodeURIComponent(sessionId)}`,
-      { method: 'POST' }
-    )
-  } catch {
-    // best-effort
-  }
+// ── backend ──────────────────────────────────────────────────────────────
+
+async function fetchSuggestion(storedId) {
+  const data = await pluginCtx.rest(`/suggestion?session_id=${encodeURIComponent(storedId)}`)
+  return (data && data.suggestion) || null
 }
 
-// ── suggestion pill component ────────────────────────────────────────────
-
-function SuggestionPill() {
-  const t = usePluginI18n(ID)
-  const suggestion = useValue($suggestion)
-  const dismissed = useValue($dismissed)
-  const sessionId = useValue(host.state.focusedSessionId)
-  const busy = useValue(host.state.busy)
-
-  // Dismiss when the agent starts a new turn
-  useEffect(() => {
-    if (busy) {
-      $suggestion.set(null)
-      $dismissed.set(false)
-    }
-  }, [busy])
-
-  // Nothing to show
-  if (!suggestion || dismissed || busy) return null
-
-  const handleClick = () => {
-    haptic('tap')
-    // Insert the suggestion text into the composer
-    // Using hermes.send would SEND it — we want to INSERT it.
-    // The best we can do from the plugin SDK is send it as a hidden prompt.
-    // But that's too aggressive. Instead, we use the host's navigate or
-    // notify as a workaround, and document that clicking sends.
-    //
-    // Actually: window.hermes.send() from preview frames sends hidden turns.
-    // From a plugin component we can use the composer insert if exposed,
-    // but the SDK doesn't expose requestComposerInsert.
-    //
-    // Pragmatic choice: clicking the pill sends the suggestion as a user
-    // message (via host.request → prompt.submit). This is the simplest
-    // approach that works with the current SDK.
-    try {
-      host.request('prompt.submit', {
-        text: suggestion,
-        session_id: sessionId
-      })
-    } catch {
-      // Fallback: just notify
-      host.notify({ kind: 'info', message: suggestion })
-    }
-
-    $suggestion.set(null)
-    $dismissed.set(true)
-    dismissOnServer(sessionId)
-  }
-
-  const handleDismiss = (e) => {
-    e.stopPropagation()
-    $suggestion.set(null)
-    $dismissed.set(true)
-    dismissOnServer(sessionId)
-  }
-
-  return jsx(Tip, {
-    label: t('tip'),
-    children: jsxs('button', {
-      type: 'button',
-      className: cn(
-        'group/np flex max-w-full items-center gap-1.5 rounded-full',
-        'bg-(--ui-surface-secondary) px-3 py-1',
-        'text-[0.8125rem] text-(--ui-text-secondary)',
-        'transition-all duration-200 ease-out',
-        'hover:bg-(--ui-accent)/12 hover:text-(--ui-accent)',
-        'animate-in fade-in slide-in-from-bottom-1 duration-300'
-      ),
-      onClick: handleClick,
-      children: [
-        jsx(Codicon, {
-          name: 'sparkle',
-          className: 'shrink-0 text-[0.75rem] opacity-60'
-        }),
-        jsx('span', {
-          className: 'truncate',
-          children: suggestion
-        }),
-        jsx('span', {
-          className: cn(
-            'ml-1 shrink-0 rounded-full p-0.5',
-            'opacity-0 transition-opacity group-hover/np:opacity-60',
-            'hover:!opacity-100 hover:bg-(--ui-text-quaternary)/20'
-          ),
-          onClick: handleDismiss,
-          children: jsx(Codicon, {
-            name: 'close',
-            className: 'text-[0.625rem]'
-          })
-        })
-      ]
-    })
-  })
+function dismissOnServer(storedId) {
+  if (!storedId || !pluginCtx) return
+  pluginCtx.rest(`/dismiss?session_id=${encodeURIComponent(storedId)}`, { method: 'POST' }).catch(() => {})
 }
 
-// ── wrapper that lives in the composer underside ─────────────────────────
+// ── UI ───────────────────────────────────────────────────────────────────
 
 function SuggestionStrip() {
+  const t = usePluginI18n(ID)
+  const storedId = useValue(host.state.focusedStoredSessionId)
+  const busy = useValue(host.state.busy)
+  const handled = useValue($handled)
+
+  // Per session, never global: another chat working (or switching screens)
+  // must not hide this chat's suggestion.
+  if (storedId && busy) busySeenAt.set(storedId, Date.now())
+
+  useEffect(() => {
+    if (!busy) idleSinceMs = Date.now()
+  }, [busy])
+
+  const query = useQuery({
+    queryKey: ['next-prompt', 'suggestion', storedId],
+    queryFn: () => fetchSuggestion(storedId),
+    enabled: Boolean(pluginCtx && storedId && !busy),
+    refetchInterval: () => (Date.now() - idleSinceMs < FAST_WINDOW_MS ? FAST_POLL_MS : SLOW_POLL_MS),
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    retry: false
+  })
+
+  useEffect(() => {
+    if (query.error && !reportedError) {
+      reportedError = true
+      host.notifyError(query.error, 'Next Prompt could not reach its backend')
+    }
+  }, [query.error])
+
+  const suggestion = query.data
+  if (busy || !storedId || !suggestion || !suggestion.text) return null
+  if (suggestion.session_id && suggestion.session_id !== storedId) return null
+  if (query.dataUpdatedAt <= (busySeenAt.get(storedId) || 0)) return null
+
+  const key = `${storedId}:${suggestion.timestamp}`
+  if (handled === key) return null
+
+  const finish = () => {
+    $handled.set(key)
+    dismissOnServer(storedId)
+  }
+
+  const onUse = () => {
+    haptic('tap')
+    if (!insertIntoComposer(suggestion.text) && pluginCtx) {
+      void pluginCtx.os.writeClipboard(suggestion.text)
+      host.notify({ kind: 'info', message: t('copied') })
+    }
+    finish()
+  }
+
+  const onDismiss = event => {
+    event.stopPropagation()
+    finish()
+  }
+
   return jsx('div', {
-    className: 'flex items-center justify-start px-2 py-1',
-    children: jsx(SuggestionPill, {})
+    className: 'flex min-w-0 items-center justify-start',
+    children: jsx(Tip, {
+      label: t('tip'),
+      children: jsxs('button', {
+        type: 'button',
+        className: cn(
+          'group/np flex min-w-0 max-w-full items-center gap-1.5 rounded-full',
+          'border border-(--ui-stroke-secondary) px-3 py-1',
+          'text-[0.8125rem] text-(--ui-text-secondary)',
+          'transition-colors duration-150 hover:border-(--ui-accent) hover:text-(--ui-accent)'
+        ),
+        onClick: onUse,
+        children: [
+          jsx(Codicon, { name: 'sparkle', className: 'shrink-0 text-[0.75rem] opacity-70' }),
+          jsx('span', { className: 'truncate', children: suggestion.text }),
+          jsx('span', {
+            role: 'button',
+            'aria-label': t('dismiss'),
+            className: 'ml-1 shrink-0 rounded-full p-0.5 opacity-50 hover:opacity-100',
+            onClick: onDismiss,
+            children: jsx(Codicon, { name: 'close', className: 'text-[0.625rem]' })
+          })
+        ]
+      })
+    })
   })
 }
 
@@ -215,27 +161,21 @@ export default {
   defaultEnabled: false, // opt-in in Settings → Plugins
 
   register(ctx) {
+    pluginCtx = ctx
+
     ctx.i18n.register({
       en: {
-        tip: 'Click to send this follow-up, or dismiss with ×',
-        sent: 'Suggestion sent'
+        tip: 'Click to put this follow-up in the composer',
+        dismiss: 'Dismiss suggestion',
+        copied: 'Suggestion copied — paste it into the composer'
       },
       es: {
-        tip: 'Clic para enviar este seguimiento, o descarta con ×',
-        sent: 'Sugerencia enviada'
-      },
-      ja: {
-        tip: 'クリックしてフォローアップを送信、×で閉じる',
-        sent: '提案を送信しました'
-      },
-      zh: {
-        tip: '点击发送此后续消息，或用 × 关闭',
-        sent: '建议已发送'
+        tip: 'Clic para poner este seguimiento en el compositor',
+        dismiss: 'Descartar sugerencia',
+        copied: 'Sugerencia copiada — pégala en el compositor'
       }
     })
 
-    // Register the pill strip in the composer underside area — the floating
-    // zone below the composer with no chrome, perfect for subtle suggestions.
     ctx.register({
       id: 'suggestion-strip',
       area: 'composer.underside',
@@ -243,24 +183,9 @@ export default {
       render: () => jsx(SuggestionStrip, {})
     })
 
-    // Start polling when the plugin loads
-    startPolling()
-
-    // Listen for session changes to reset state
-    const disposer = host.onEvent('*', (event) => {
-      if (!event) return
-      const type = typeof event === 'string' ? event : event.type || event.event
-      // Reset on session switch or new turn
-      if (type === 'session.switched' || type === 'session.created') {
-        $suggestion.set(null)
-        $dismissed.set(false)
-      }
-    })
-
-    // Clean up on plugin unload (HMR / disable)
     ctx.onDispose(() => {
-      stopPolling()
-      if (typeof disposer === 'function') disposer()
+      pluginCtx = null
+      reportedError = false
     })
   }
 }

@@ -7,12 +7,10 @@ author: soymarketing
 license: MIT
 homepage: https://github.com/soymarketing/hermes-plugin-next-prompt
 tags: [desktop, productivity, composer, suggestions]
-api: dashboard/plugin_api.py
 provides_hooks:
+  - pre_llm_call
   - post_llm_call
 provides_tools: []
-capabilities:
-  - llm.model_override
 config_schema:
   enabled:
     type: bool
