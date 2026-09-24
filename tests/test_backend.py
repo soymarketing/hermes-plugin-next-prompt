@@ -203,6 +203,97 @@ class GenerationTests(PluginTestCase):
         self.assertNotIn("old", module._live({"old": old}))
 
 
+class ContextAndCleanTests(unittest.TestCase):
+    """The prompt input and the output filter, without any LLM."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_plugin()
+
+    @classmethod
+    def tearDownClass(cls):
+        sys.modules.pop(cls.m.__name__, None)
+
+    def test_tool_heavy_turn_keeps_the_request_and_the_final_reply(self):
+        history = [
+            {"role": "user", "content": "Arregla el bug del login"},
+            {"role": "assistant", "content": "Voy a revisar los logs.", "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "content": "x" * 5000, "tool_call_id": "1"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "2"}]},
+            {"role": "tool", "content": "y" * 5000, "tool_call_id": "2"},
+            {"role": "assistant", "content": "Listo: el token expiraba antes de tiempo. Lo corregí en auth.py."},
+        ]
+        context = self.m._build_context(history, 4)
+        self.assertIn("[User]: Arregla el bug del login", context)
+        self.assertIn("[Agent]: Listo: el token expiraba", context)
+        self.assertNotIn("Voy a revisar los logs", context, "narration between tool calls is dropped")
+        self.assertNotIn("xxxx", context, "tool output never reaches the prompt")
+
+    def test_keeps_the_last_exchanges_only(self):
+        history = []
+        for i in range(5):
+            history += [{"role": "user", "content": f"pregunta {i}"}, {"role": "assistant", "content": f"respuesta {i}"}]
+        context = self.m._build_context(history, 4)
+        self.assertNotIn("pregunta 2", context)
+        self.assertIn("pregunta 3", context)
+        self.assertTrue(context.endswith("[Agent]: respuesta 4"))
+
+    def test_long_reply_keeps_its_ending(self):
+        reply = "inicio " + "relleno " * 400 + "¿Quieres que lo despliegue?"
+        context = self.m._build_context([{"role": "user", "content": "hazlo"}, {"role": "assistant", "content": reply}], 4)
+        self.assertIn("¿Quieres que lo despliegue?", context)
+        self.assertIn("inicio", context)
+        self.assertLess(len(context), 1400)
+
+    def test_multimodal_content_is_reduced_to_text(self):
+        history = [
+            {"role": "user", "content": [{"type": "text", "text": "mira esta imagen"}, {"type": "image_url", "image_url": {"url": "data:x"}}]},
+            {"role": "assistant", "content": "Es un gato."},
+        ]
+        self.assertIn("[User]: mira esta imagen", self.m._build_context(history, 4))
+
+    def test_language_reminder_quotes_the_users_last_message(self):
+        history = [
+            {"role": "user", "content": "Arregla el login"},
+            {"role": "assistant", "content": "Listo."},
+            {"role": "user", "content": "Now compare  Stripe\nand Mercado Pago fees in Mexico " + "x" * 400},
+            {"role": "assistant", "content": "Stripe charges 3.6%."},
+        ]
+        last = self.m._last_user_text(history)
+        self.assertTrue(last.startswith("Now compare"))
+        system, user = self.m._prompt_messages(self.m._build_context(history, 4), last)
+        self.assertEqual(system["role"], "system")
+        tail = user["content"].rsplit("\n\n", 1)[1]
+        self.assertIn('"Now compare Stripe and Mercado Pago fees in Mexico', tail, "whitespace collapsed, quoted")
+        self.assertLess(len(tail), 300, "the sample is capped")
+
+    def test_language_reminder_without_a_user_message(self):
+        self.assertEqual(self.m._last_user_text([{"role": "assistant", "content": "hola"}]), "")
+        _, user = self.m._prompt_messages("[Agent]: hola", "")
+        self.assertTrue(user["content"].endswith("Write in the user's language."))
+
+    def test_clean(self):
+        cases = {
+            "Corre los tests": "Corre los tests",
+            '"Corre los tests"': "Corre los tests",
+            "“Corre los tests”": "Corre los tests",
+            "«Corre los tests»": "Corre los tests",
+            "Suggestion: Run the tests": "Run the tests",
+            "**Run the tests**": "Run the tests",
+            "Run the tests\nBecause the fix touched auth.py": "Run the tests",
+            "NULL": "",
+            "null.": "",
+            "NULL — the agent asked a question": "",
+            "None": "",
+            "": "",
+            "ok": "",
+            "x" * 200: "",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw[:40]):
+                self.assertEqual(self.m._clean(raw), expected)
+
+
 class AuthError(Exception):
     """Shaped like anthropic/openai AuthenticationError."""
 

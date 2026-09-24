@@ -142,45 +142,137 @@ def _record_error(session_id: str, kind: str) -> None:
 # ── suggestion generation ────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-You are a prompt-suggestion assistant. Given the last few messages of a \
-conversation between a user and an AI agent, decide whether there is a \
-natural, useful follow-up the user might want to send next.
+You predict the next message a user will send to their AI agent. It is shown \
+as a one-click suggestion under the chat input: clicking it puts the text in \
+the input box, and the user sends it.
 
-Rules:
-- If there IS a good follow-up, respond with ONLY the suggested prompt \
-text (one sentence, imperative, concise — what the user would type).
-- If the task is clearly finished, the agent asked a question the user \
-must answer themselves, or there is no useful continuation, respond with \
-exactly: NULL
-- Match the language the user has been writing in.
-- Never explain your reasoning. Output only the suggestion or NULL.
-- Keep it under 80 characters.
+Suggest a next step when there is one. Most turns have one, even finished \
+tasks: verify or test what was just done, apply it somewhere related, drill \
+into a detail the agent surfaced, or move to the next pending item the agent \
+mentioned.
+
+Answer exactly NULL when:
+- the agent's last message asks the user a question, offers a choice, or \
+needs a decision or information only the user has. Never answer it for the \
+user, even when one answer looks likely; or
+- the exchange is closed socially (thanks, goodbye) with nothing to act on.
+
+Writing rules:
+- Write in the language of the user's last message, whatever the language \
+of the topic, the names in it, or these instructions.
+- One short request under 80 characters, phrased the way the user writes to \
+the agent (usually imperative).
+- The user has done nothing since the agent's last message. Never report \
+actions or results ("I restarted it", "it works now"); ask the agent for \
+the next step instead.
+- Specific to this conversation: use its names, files and numbers. Never \
+generic ("Continue", "Tell me more").
+- Never ask for something the agent already did or already answered.
+- Output only the suggestion, or NULL. No quotes, labels or explanation.
+
+Examples (the language always follows the user, never the example):
+User: "Fix the parser crash" Agent: "Fixed the null check in parser.py; all 42 tests pass." -> Commit the parser.py fix
+User: "Resume las ventas de agosto" Agent: "312 pedidos; Monterrey cayó 18%." -> ¿Por qué cayeron las ventas en Monterrey?
+User: "Fix the login bug" Agent: "Done. Restart the app to try it." -> Add a test that covers the login bug
+Agent: "Should I deploy to staging or straight to production?" -> NULL
+Agent: "Want me to email it to all 40 clients?" -> NULL
+User: "Perfect, thanks!" Agent: "Anytime!" -> NULL
 """
+
+_LANGUAGE_REMINDER = "Write the suggestion in the same language as the user's last message: \"{sample}\""
+_LANGUAGE_SAMPLE_CHARS = 200
+
+
+def _last_user_text(messages: list) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            text = _text_of(msg)
+            if text:
+                return text
+    return ""
+
+
+def _prompt_messages(context: str, last_user: str = "") -> list:
+    """System prompt plus the conversation. The language rule is repeated
+    last, quoting the user's own words: models otherwise drift to the topic's
+    language (an English question about Mexico got Spanish suggestions)."""
+    sample = " ".join(last_user.split())[:_LANGUAGE_SAMPLE_CHARS]
+    tail = _LANGUAGE_REMINDER.format(sample=sample) if sample else "Write in the user's language."
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": f"Recent conversation:\n\n{context}\n\n{tail}"},
+    ]
+
+# The newest messages are the ones that matter; a long reply's conclusion and
+# closing question sit at its end, so keep more of the tail than the head.
+_HEAD_CHARS = 300
+_TAIL_CHARS = 900
+_MAX_SUGGESTION_CHARS = 160
+_NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
+_LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
+_QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
+
+
+def _text_of(msg: Dict[str, Any]) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _clip(text: str) -> str:
+    if len(text) <= _HEAD_CHARS + _TAIL_CHARS:
+        return text
+    return f"{text[:_HEAD_CHARS].rstrip()} … {text[-_TAIL_CHARS:].lstrip()}"
 
 
 def _build_context(messages: list, max_messages: int) -> str:
-    parts = []
-    for msg in messages[-max_messages:]:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-            )
-        if not isinstance(content, str) or not content.strip():
+    """The last few user requests and the agent's FINAL reply to each.
+
+    ``conversation_history`` is dominated by tool traffic — tool results and
+    the agent's narration between tool calls. Those are skipped: a turn is the
+    user's message plus the last assistant text before the next user message.
+    Without this the user's request often fell outside the window entirely.
+    """
+    exchanges: list = []  # [user_text, final_assistant_text]
+    for msg in messages:
+        if not isinstance(msg, dict):
             continue
-        if len(content) > 500:
-            content = content[:500] + "…"
-        label = "User" if role == "user" else "Agent" if role == "assistant" else role
-        parts.append(f"[{label}]: {content.strip()}")
+        role = msg.get("role")
+        text = _text_of(msg)
+        if role == "user" and text:
+            exchanges.append([text, ""])
+        elif role == "assistant" and text and exchanges:
+            exchanges[-1][1] = text  # later assistant text supersedes narration
+    keep = max(1, int(max_messages) // 2)
+    parts = []
+    for user_text, reply in exchanges[-keep:]:
+        parts.append(f"[User]: {_clip(user_text)}")
+        if reply:
+            parts.append(f"[Agent]: {_clip(reply)}")
     return "\n\n".join(parts)
 
 
 def _clean(text: str) -> str:
-    text = (text or "").strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    text = lines[0]
+    lowered = text.lower()
+    for label in _LABELS:
+        if lowered.startswith(label):
+            text = text[len(label):].strip()
+            break
+    text = text.strip("*_ ").strip()
+    if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
         text = text[1:-1].strip()
-    return "" if text.upper() == "NULL" or len(text) < 3 else text
+    if text.upper().rstrip(".!") in _NULL_ANSWERS or text.upper().startswith("NULL"):
+        return ""
+    if len(text) < 3 or len(text) > _MAX_SUGGESTION_CHARS:
+        return ""
+    return text
 
 
 def _generate_suggestion(session_id: str, seq: int, messages: list, settings: dict) -> None:
@@ -193,12 +285,9 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             return
         kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Recent conversation:\n\n{context}"},
-            ],
+            messages=_prompt_messages(context, _last_user_text(messages)),
             max_tokens=100,
-            temperature=0.7,
+            temperature=0.3,
             purpose="next-prompt suggestion",
             **kwargs,
         )
