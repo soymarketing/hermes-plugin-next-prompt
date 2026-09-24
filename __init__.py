@@ -29,6 +29,10 @@ _AUX_TASK = "next_prompt"
 # session_id → {"text", "session_id", "timestamp"}. Read by plugin_api.py.
 _suggestions: Dict[str, Dict[str, Any]] = {}
 _suggestions_lock = threading.Lock()
+# session_id → {"kind", "session_id", "timestamp"} for the last turn whose
+# suggestion could not be generated. Memory only (a restart may be the fix);
+# guarded by _suggestions_lock. Read by plugin_api.py.
+_errors: Dict[str, Dict[str, Any]] = {}
 # session_id → turn counter, bumped when the user sends a message. A
 # generator launched for an older turn must not publish over a newer one.
 _turn_seq: Dict[str, int] = {}
@@ -107,10 +111,32 @@ def _persist(session_id: str, suggestion: Optional[Dict[str, Any]]) -> None:
 
 
 def clear_suggestion(session_id: str) -> None:
-    """Drop a session's suggestion (used, dismissed, or superseded)."""
+    """Drop a session's suggestion and failure note (used, dismissed, or superseded)."""
     with _suggestions_lock:
         _suggestions.pop(session_id, None)
+        _errors.pop(session_id, None)
         _persist(session_id, None)
+
+
+def _classify_error(exc: BaseException) -> str:
+    """Coarse failure kind for the UI. Never exposes the error text itself."""
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    name = type(exc).__name__.lower()
+    if status in (401, 403) or "authentication" in name or "permissiondenied" in name:
+        return "auth"
+    if status == 429 or "ratelimit" in name:
+        return "rate_limit"
+    if "timeout" in name:
+        return "timeout"
+    return "other"
+
+
+def _record_error(session_id: str, kind: str) -> None:
+    """Caller holds ``_suggestions_lock``."""
+    _errors[session_id] = {"kind": kind, "session_id": session_id, "timestamp": time.time()}
+    if len(_errors) > _MAX_STORED:
+        oldest = min(_errors, key=lambda sid: _errors[sid]["timestamp"])
+        _errors.pop(oldest, None)
 
 
 # ── suggestion generation ────────────────────────────────────────────────
@@ -177,13 +203,17 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             **kwargs,
         )
         text = _clean(getattr(result, "text", ""))
-    except Exception:
+    except Exception as exc:
         logger.warning("next-prompt: suggestion generation failed for %s", session_id, exc_info=True)
+        with _suggestions_lock:
+            if _turn_seq.get(session_id, 0) == seq:
+                _record_error(session_id, _classify_error(exc))
         return
 
     with _suggestions_lock:
         if _turn_seq.get(session_id, 0) != seq:
             return  # the user already moved on; this suggestion is stale
+        _errors.pop(session_id, None)
         if not text:
             _suggestions.pop(session_id, None)
             _persist(session_id, None)

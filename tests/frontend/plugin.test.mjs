@@ -15,12 +15,14 @@ const strip = contribution(ctx, 'composer.underside')
 let stamp = 0
 const suggestion = (session_id, text = 'Sigue con el deploy') => ({ text, session_id, timestamp: ++stamp })
 const render = () => expand(strip.render())
-const pill = () => find(render(), n => n.type === 'button')
+const pill = () => find(render(), n => n.type === 'button' && n.props?.['aria-label'] !== 'dismiss')
 const pillText = () => {
   const button = pill()
   return button ? textOf(button).trim() : null
 }
-const closeButton = () => find(render(), n => n.props?.role === 'button')
+const closeButton = () => find(render(), n => n.props?.role === 'button' || n.props?.['aria-label'] === 'dismiss')
+const note = () => find(render(), n => n.props?.role === 'status')
+const failure = (session_id, kind) => ({ kind, session_id, timestamp: ++stamp })
 
 test('only imports the SDK, react and react/jsx-runtime', () => {
   const specifiers = [...PLUGIN_SOURCE.matchAll(/^import .* from '([^']+)'/gm)].map(m => m[1])
@@ -147,4 +149,51 @@ test('× dismisses without using the text', () => {
   assert.equal(pillText(), null)
   assert.deepEqual(calls.clip, [])
   assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+})
+
+test('a failed generation shows a muted note that names the cause', () => {
+  for (const kind of ['auth', 'rate_limit', 'timeout', 'other']) {
+    view('A')
+    serve('A', null, failure('A', kind))
+    assert.equal(pill(), null, 'no pill for a failure')
+    assert.equal(textOf(note()).trim(), `failure.${kind}`)
+  }
+})
+
+test('an unknown failure kind falls back to the generic note', () => {
+  view('A')
+  serve('A', null, failure('A', 'something-new'))
+  assert.equal(textOf(note()).trim(), 'failure.other')
+})
+
+test('the failure note can be dismissed and stays dismissed', () => {
+  view('A')
+  serve('A', null, failure('A', 'auth'))
+  closeButton().props.onClick()
+  assert.equal(note(), null)
+  assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+  render()
+  assert.equal(note(), null)
+})
+
+test('a suggestion wins over a failure note', () => {
+  view('A')
+  serve('A', suggestion('A', 'Gana la sugerencia'), failure('A', 'auth'))
+  assert.equal(pillText(), 'Gana la sugerencia')
+  assert.equal(note(), null)
+})
+
+test('a failure for another session is never shown', () => {
+  view('A')
+  serve('A', null, failure('Z', 'auth'))
+  assert.equal(note(), null)
+})
+
+test('the failure note is hidden while the chat works', async () => {
+  view('A')
+  serve('A', null, failure('A', 'timeout'))
+  assert.ok(note())
+  await sleep(5)
+  view('A', true)
+  assert.equal(note(), null)
 })

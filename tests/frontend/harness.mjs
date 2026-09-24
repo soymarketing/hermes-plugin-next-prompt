@@ -90,8 +90,8 @@ export function view(storedId, busy = false) {
 }
 
 /** The backend answered GET /suggestion for this session just now. */
-export function serve(storedId, suggestion) {
-  server.set(storedId, { data: suggestion, dataUpdatedAt: Date.now() + 1, error: null })
+export function serve(storedId, suggestion, error = null) {
+  server.set(storedId, { data: { suggestion, error }, dataUpdatedAt: Date.now() + 1, error: null })
 }
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))

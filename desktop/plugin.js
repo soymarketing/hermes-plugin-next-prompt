@@ -6,6 +6,7 @@
  * AI-generated follow-up and shows it as a subtle pill below the composer.
  * Click → the text goes into the composer (not sent) through the SDK's
  * `host.composer`, or to the clipboard on hosts without it. × → dismiss.
+ * When the suggestion could not be generated, a muted note says why instead.
  */
 
 import { atom, cn, Codicon, haptic, host, Tip, usePluginI18n, useQuery, useValue } from '@hermes/plugin-sdk'
@@ -17,7 +18,7 @@ const ID = 'next-prompt'
 /** Set in register(); components read it (ctx.rest is plugin-scoped). */
 let pluginCtx = null
 
-/** `${storedSessionId}:${timestamp}` the user dismissed or used. */
+/** `${storedSessionId}:${kind}:${timestamp}` the user dismissed or used. */
 const $handled = atom(null)
 /** storedSessionId → last epoch ms that chat was seen working. Data fetched
  *  before then predates the turn and waits for a fresh fetch. The backend is
@@ -31,6 +32,7 @@ let reportedError = false
 const FAST_POLL_MS = 2000
 const SLOW_POLL_MS = 20000
 const FAST_WINDOW_MS = 45000
+const FAILURE_KINDS = new Set(['auth', 'rate_limit', 'timeout', 'other'])
 
 // ── composer insertion ───────────────────────────────────────────────────
 // SDK only. `host.composer.insertText` (Desktop plugin SDK hook 1, #116305)
@@ -50,9 +52,10 @@ async function insertIntoComposer(text) {
 
 // ── backend ──────────────────────────────────────────────────────────────
 
-async function fetchSuggestion(storedId) {
+/** `{ suggestion, error }` for one session (see dashboard/plugin_api.py). */
+async function fetchState(storedId) {
   const data = await pluginCtx.rest(`/suggestion?session_id=${encodeURIComponent(storedId)}`)
-  return (data && data.suggestion) || null
+  return { suggestion: (data && data.suggestion) || null, error: (data && data.error) || null }
 }
 
 function dismissOnServer(storedId) {
@@ -62,47 +65,14 @@ function dismissOnServer(storedId) {
 
 // ── UI ───────────────────────────────────────────────────────────────────
 
-function SuggestionStrip() {
+const rowClass = 'flex min-w-0 items-center justify-start'
+const closeClass = 'ml-1 shrink-0 rounded-full p-0.5 opacity-50 hover:opacity-100'
+
+function SuggestionPill({ storedId, suggestion, handledKey }) {
   const t = usePluginI18n(ID)
-  const storedId = useValue(host.state.focusedStoredSessionId)
-  const busy = useValue(host.state.busy)
-  const handled = useValue($handled)
-
-  // Per session, never global: another chat working (or switching screens)
-  // must not hide this chat's suggestion.
-  if (storedId && busy) busySeenAt.set(storedId, Date.now())
-
-  useEffect(() => {
-    if (!busy) idleSinceMs = Date.now()
-  }, [busy])
-
-  const query = useQuery({
-    queryKey: ['next-prompt', 'suggestion', storedId],
-    queryFn: () => fetchSuggestion(storedId),
-    enabled: Boolean(pluginCtx && storedId && !busy),
-    refetchInterval: () => (Date.now() - idleSinceMs < FAST_WINDOW_MS ? FAST_POLL_MS : SLOW_POLL_MS),
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    retry: false
-  })
-
-  useEffect(() => {
-    if (query.error && !reportedError) {
-      reportedError = true
-      host.notifyError(query.error, 'Next Prompt could not reach its backend')
-    }
-  }, [query.error])
-
-  const suggestion = query.data
-  if (busy || !storedId || !suggestion || !suggestion.text) return null
-  if (suggestion.session_id && suggestion.session_id !== storedId) return null
-  if (query.dataUpdatedAt <= (busySeenAt.get(storedId) || 0)) return null
-
-  const key = `${storedId}:${suggestion.timestamp}`
-  if (handled === key) return null
 
   const finish = () => {
-    $handled.set(key)
+    $handled.set(handledKey)
     dismissOnServer(storedId)
   }
 
@@ -126,7 +96,7 @@ function SuggestionStrip() {
   }
 
   return jsx('div', {
-    className: 'flex min-w-0 items-center justify-start',
+    className: rowClass,
     children: jsx(Tip, {
       label: t('tip'),
       children: jsxs('button', {
@@ -144,7 +114,7 @@ function SuggestionStrip() {
           jsx('span', {
             role: 'button',
             'aria-label': t('dismiss'),
-            className: 'ml-1 shrink-0 rounded-full p-0.5 opacity-50 hover:opacity-100',
+            className: closeClass,
             onClick: onDismiss,
             children: jsx(Codicon, { name: 'close', className: 'text-[0.625rem]' })
           })
@@ -152,6 +122,93 @@ function SuggestionStrip() {
       })
     })
   })
+}
+
+/** Muted, dismissible note in the pill's place when generation failed. */
+function FailureNote({ storedId, failure, handledKey }) {
+  const t = usePluginI18n(ID)
+  const kind = FAILURE_KINDS.has(failure.kind) ? failure.kind : 'other'
+
+  const onDismiss = () => {
+    $handled.set(handledKey)
+    dismissOnServer(storedId)
+  }
+
+  return jsx('div', {
+    className: rowClass,
+    children: jsx(Tip, {
+      label: t(`failure.${kind}Hint`),
+      children: jsxs('div', {
+        role: 'status',
+        className: cn(
+          'flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-3 py-1',
+          'text-[0.8125rem] text-(--ui-text-tertiary)'
+        ),
+        children: [
+          jsx(Codicon, { name: 'warning', className: 'shrink-0 text-[0.75rem] opacity-70' }),
+          jsx('span', { className: 'truncate', children: t(`failure.${kind}`) }),
+          jsx('button', {
+            type: 'button',
+            'aria-label': t('dismiss'),
+            className: closeClass,
+            onClick: onDismiss,
+            children: jsx(Codicon, { name: 'close', className: 'text-[0.625rem]' })
+          })
+        ]
+      })
+    })
+  })
+}
+
+function SuggestionStrip() {
+  const storedId = useValue(host.state.focusedStoredSessionId)
+  const busy = useValue(host.state.busy)
+  const handled = useValue($handled)
+
+  // Per session, never global: another chat working (or switching screens)
+  // must not hide this chat's suggestion.
+  if (storedId && busy) busySeenAt.set(storedId, Date.now())
+
+  useEffect(() => {
+    if (!busy) idleSinceMs = Date.now()
+  }, [busy])
+
+  const query = useQuery({
+    queryKey: ['next-prompt', 'suggestion', storedId],
+    queryFn: () => fetchState(storedId),
+    enabled: Boolean(pluginCtx && storedId && !busy),
+    refetchInterval: () => (Date.now() - idleSinceMs < FAST_WINDOW_MS ? FAST_POLL_MS : SLOW_POLL_MS),
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    retry: false
+  })
+
+  useEffect(() => {
+    if (query.error && !reportedError) {
+      reportedError = true
+      host.notifyError(query.error, 'Next Prompt could not reach its backend')
+    }
+  }, [query.error])
+
+  if (busy || !storedId || !query.data) return null
+  if (query.dataUpdatedAt <= (busySeenAt.get(storedId) || 0)) return null
+
+  const { suggestion, error: failure } = query.data
+  const mine = item => item && (!item.session_id || item.session_id === storedId)
+
+  if (mine(suggestion) && suggestion.text) {
+    const handledKey = `${storedId}:suggestion:${suggestion.timestamp}`
+    if (handled === handledKey) return null
+    return jsx(SuggestionPill, { storedId, suggestion, handledKey })
+  }
+
+  if (mine(failure)) {
+    const handledKey = `${storedId}:failure:${failure.timestamp}`
+    if (handled === handledKey) return null
+    return jsx(FailureNote, { storedId, failure, handledKey })
+  }
+
+  return null
 }
 
 // ── plugin export ────────────────────────────────────────────────────────
@@ -169,13 +226,35 @@ export default {
         tip: 'Click to use this follow-up',
         dismiss: 'Dismiss suggestion',
         copied: 'Suggestion copied — paste it into the composer',
-        copyFailed: 'Could not copy the suggestion'
+        copyFailed: 'Could not copy the suggestion',
+        failure: {
+          auth: 'Next Prompt: the model rejected its credentials',
+          authHint:
+            'Check the provider login (hermes auth list), or fully quit and reopen Hermes Desktop. You can also point auxiliary.next_prompt at another provider in config.yaml.',
+          rate_limit: 'Next Prompt: the provider is rate-limiting requests',
+          rate_limitHint: 'It tries again after your next message.',
+          timeout: 'Next Prompt: the model took too long',
+          timeoutHint: 'It tries again after your next message.',
+          other: 'Next Prompt could not generate a suggestion',
+          otherHint: 'Details are in the Hermes logs (hermes logs --level WARNING).'
+        }
       },
       es: {
         tip: 'Clic para usar este seguimiento',
         dismiss: 'Descartar sugerencia',
         copied: 'Sugerencia copiada — pégala en el compositor',
-        copyFailed: 'No se pudo copiar la sugerencia'
+        copyFailed: 'No se pudo copiar la sugerencia',
+        failure: {
+          auth: 'Next Prompt: el modelo rechazó sus credenciales',
+          authHint:
+            'Revisa el login del proveedor (hermes auth list) o cierra Hermes Desktop por completo, también desde la bandeja, y vuelve a abrirlo. También puedes apuntar auxiliary.next_prompt a otro proveedor en config.yaml.',
+          rate_limit: 'Next Prompt: el proveedor está limitando las peticiones',
+          rate_limitHint: 'Lo intentará de nuevo tras tu próximo mensaje.',
+          timeout: 'Next Prompt: el modelo tardó demasiado',
+          timeoutHint: 'Lo intentará de nuevo tras tu próximo mensaje.',
+          other: 'Next Prompt no pudo generar una sugerencia',
+          otherHint: 'Los detalles están en los logs de Hermes (hermes logs --level WARNING).'
+        }
       }
     })
 

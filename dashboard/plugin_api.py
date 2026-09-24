@@ -28,15 +28,23 @@ def _instances():
 
 @router.get("/suggestion")
 async def get_suggestion(session_id: str = Query("")):
+    """The session's pending suggestion, or — when the last attempt failed and
+    nothing newer exists — the failure kind so the UI can say why."""
     if not session_id:
-        return {"suggestion": None}
+        return {"suggestion": None, "error": None}
     best = None
+    failure = None
     for mod in _instances():
         with mod._suggestions_lock:
             found = mod._suggestions.get(session_id)
+            failed = getattr(mod, "_errors", {}).get(session_id)
         if found and (best is None or found.get("timestamp", 0) > best.get("timestamp", 0)):
             best = dict(found)
-    return {"suggestion": best}
+        if failed and (failure is None or failed.get("timestamp", 0) > failure.get("timestamp", 0)):
+            failure = dict(failed)
+    if best and failure and best.get("timestamp", 0) >= failure.get("timestamp", 0):
+        failure = None
+    return {"suggestion": best, "error": failure}
 
 
 @router.post("/dismiss")
@@ -49,4 +57,5 @@ async def dismiss_suggestion(session_id: str = Query("")):
             else:
                 with mod._suggestions_lock:
                     mod._suggestions.pop(session_id, None)
+                    getattr(mod, "_errors", {}).pop(session_id, None)
     return {"ok": True}

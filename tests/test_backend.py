@@ -203,6 +203,80 @@ class GenerationTests(PluginTestCase):
         self.assertNotIn("old", module._live({"old": old}))
 
 
+class AuthError(Exception):
+    """Shaped like anthropic/openai AuthenticationError."""
+
+    status_code = 401
+
+
+class RateLimitError(Exception):
+    status_code = 429
+
+
+class ReadTimeout(Exception):
+    pass
+
+
+class FailureTests(PluginTestCase):
+    def failed(self, module, session_id):
+        with module._suggestions_lock:
+            return dict(module._errors.get(session_id) or {})
+
+    def test_failure_kinds(self):
+        cases = [
+            (AuthError("revoked"), "auth"),
+            (RateLimitError("slow down"), "rate_limit"),
+            (ReadTimeout("late"), "timeout"),
+            (RuntimeError("boom"), "other"),
+        ]
+        for error, kind in cases:
+            with self.subTest(kind=kind):
+                module, ctx = self.start(FakeLLM(error=error))
+                self.turn_done(ctx, "s1")
+                self.assertTrue(wait_for(lambda: self.failed(module, "s1")))
+                self.assertEqual(self.failed(module, "s1")["kind"], kind)
+
+    def test_failure_detail_never_leaks(self):
+        module, ctx = self.start(FakeLLM(error=AuthError("sk-secret-token-in-message")))
+        self.turn_done(ctx, "s1")
+        self.assertTrue(wait_for(lambda: self.failed(module, "s1")))
+        self.assertNotIn("sk-secret", json.dumps(self.failed(module, "s1")))
+
+    def test_failure_is_not_written_to_disk(self):
+        module, ctx = self.start(FakeLLM(error=AuthError("x")))
+        self.turn_done(ctx, "s1")
+        self.assertTrue(wait_for(lambda: self.failed(module, "s1")))
+        self.assertNotIn("s1", self.stored())
+
+    def test_success_clears_the_failure(self):
+        llm = FakeLLM(error=AuthError("x"))
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s1")
+        self.assertTrue(wait_for(lambda: self.failed(module, "s1")))
+        llm.error = None
+        module._last_suggestion_time.clear()
+        self.turn_done(ctx, "s1")
+        self.assertTrue(wait_for(lambda: self.has(module, "s1")))
+        self.assertEqual(self.failed(module, "s1"), {})
+
+    def test_own_message_clears_the_failure(self):
+        module, ctx = self.start(FakeLLM(error=AuthError("x")))
+        self.turn_done(ctx, "s1")
+        self.assertTrue(wait_for(lambda: self.failed(module, "s1")))
+        ctx.hooks["pre_llm_call"](session_id="s1")
+        self.assertEqual(self.failed(module, "s1"), {})
+
+    def test_failure_for_an_old_turn_is_discarded(self):
+        llm = FakeLLM(error=AuthError("x"), delay=0.4)
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s2")
+        time.sleep(0.05)
+        ctx.hooks["pre_llm_call"](session_id="s2")
+        self.assertTrue(wait_for(lambda: llm.calls))
+        time.sleep(0.6)
+        self.assertEqual(self.failed(module, "s2"), {})
+
+
 class RestApiTests(PluginTestCase):
     def setUp(self):
         super().setUp()
@@ -222,8 +296,27 @@ class RestApiTests(PluginTestCase):
         self.assertTrue(wait_for(lambda: self.has(module, "s4")))
         self.assertEqual(self.get("s4")["suggestion"]["text"], "Revisa los logs")
         self.client.post("/api/plugins/next-prompt/dismiss", params={"session_id": "s4"})
-        self.assertEqual(self.get("s4"), {"suggestion": None})
+        self.assertEqual(self.get("s4"), {"suggestion": None, "error": None})
         self.assertNotIn("s4", self.stored())
+
+    def test_failure_is_reported_and_dismissable(self):
+        module, ctx = self.start(FakeLLM(error=AuthError("x")))
+        self.turn_done(ctx, "s5")
+        self.assertTrue(wait_for(lambda: self.get("s5")["error"]))
+        body = self.get("s5")
+        self.assertIsNone(body["suggestion"])
+        self.assertEqual(body["error"]["kind"], "auth")
+        self.client.post("/api/plugins/next-prompt/dismiss", params={"session_id": "s5"})
+        self.assertEqual(self.get("s5"), {"suggestion": None, "error": None})
+
+    def test_newer_suggestion_hides_an_older_failure(self):
+        module, _ = self.start()
+        with module._suggestions_lock:
+            module._errors["s6"] = {"kind": "auth", "session_id": "s6", "timestamp": 1.0}
+            module._suggestions["s6"] = {"text": "ok", "session_id": "s6", "timestamp": 2.0}
+        body = self.get("s6")
+        self.assertEqual(body["suggestion"]["text"], "ok")
+        self.assertIsNone(body["error"])
 
     def test_newest_wins_across_profile_instances(self):
         first, _ = self.start()
@@ -233,8 +326,8 @@ class RestApiTests(PluginTestCase):
         with second._suggestions_lock:
             second._suggestions["s1"] = {"text": "new", "session_id": "s1", "timestamp": 2.0}
         self.assertEqual(self.get("s1")["suggestion"]["text"], "new")
-        self.assertEqual(self.get("missing"), {"suggestion": None})
-        self.assertEqual(self.get(""), {"suggestion": None})
+        self.assertEqual(self.get("missing"), {"suggestion": None, "error": None})
+        self.assertEqual(self.get(""), {"suggestion": None, "error": None})
 
 
 if __name__ == "__main__":
