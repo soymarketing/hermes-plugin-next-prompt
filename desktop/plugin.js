@@ -4,7 +4,8 @@
  * After a turn finishes, polls this plugin's Python backend (through
  * `ctx.rest`, which routes to the right backend and carries auth) for an
  * AI-generated follow-up and shows it as a subtle pill below the composer.
- * Click → the text is placed in the composer (not sent). × → dismiss.
+ * Click → the text goes into the composer (not sent) through the SDK's
+ * `host.composer`, or to the clipboard on hosts without it. × → dismiss.
  */
 
 import { atom, cn, Codicon, haptic, host, Tip, usePluginI18n, useQuery, useValue } from '@hermes/plugin-sdk'
@@ -32,24 +33,19 @@ const SLOW_POLL_MS = 20000
 const FAST_WINDOW_MS = 45000
 
 // ── composer insertion ───────────────────────────────────────────────────
-// The SDK has no public "insert into composer" door yet. The composer listens
-// on a window event bus (app/chat/composer/focus.ts); target the visible one.
-function visibleComposerTarget() {
-  if (typeof document === 'undefined') return null
-  const surfaces = Array.from(document.querySelectorAll('[data-composer-target]'))
-  const visible = surfaces.find(el => !el.closest('[data-pane-hidden]')) || surfaces[0]
-  return visible ? visible.getAttribute('data-composer-target') : null
-}
-
-function insertIntoComposer(text) {
-  const target = visibleComposerTarget()
-  if (!target) return false
-  window.dispatchEvent(new CustomEvent('hermes:composer-insert', { detail: { mode: 'block', target, text } }))
-  window.setTimeout(
-    () => window.dispatchEvent(new CustomEvent('hermes:composer-focus', { detail: { target } })),
-    0
-  )
-  return true
+// SDK only. `host.composer.insertText` (Desktop plugin SDK hook 1, #116305)
+// places the text in the focused composer without sending it and focuses the
+// caret; it resolves false when no composer can take it. Hosts without the
+// hook fall back to the clipboard. The app's composer DOM and internal event
+// bus are never touched.
+async function insertIntoComposer(text) {
+  const composer = host.composer
+  if (!composer || typeof composer.insertText !== 'function') return false
+  try {
+    return (await composer.insertText(null, text, { mode: 'block' })) === true
+  } catch {
+    return false
+  }
 }
 
 // ── backend ──────────────────────────────────────────────────────────────
@@ -110,13 +106,18 @@ function SuggestionStrip() {
     dismissOnServer(storedId)
   }
 
-  const onUse = () => {
+  const onUse = async () => {
     haptic('tap')
-    if (!insertIntoComposer(suggestion.text) && pluginCtx) {
-      void pluginCtx.os.writeClipboard(suggestion.text)
-      host.notify({ kind: 'info', message: t('copied') })
-    }
+    const text = suggestion.text
     finish()
+    if (await insertIntoComposer(text)) return
+    if (!pluginCtx) return
+    try {
+      await pluginCtx.os.writeClipboard(text)
+      host.notify({ kind: 'info', message: t('copied') })
+    } catch (error) {
+      host.notifyError(error, t('copyFailed'))
+    }
   }
 
   const onDismiss = event => {
@@ -165,14 +166,16 @@ export default {
 
     ctx.i18n.register({
       en: {
-        tip: 'Click to put this follow-up in the composer',
+        tip: 'Click to use this follow-up',
         dismiss: 'Dismiss suggestion',
-        copied: 'Suggestion copied — paste it into the composer'
+        copied: 'Suggestion copied — paste it into the composer',
+        copyFailed: 'Could not copy the suggestion'
       },
       es: {
-        tip: 'Clic para poner este seguimiento en el compositor',
+        tip: 'Clic para usar este seguimiento',
         dismiss: 'Descartar sugerencia',
-        copied: 'Sugerencia copiada — pégala en el compositor'
+        copied: 'Sugerencia copiada — pégala en el compositor',
+        copyFailed: 'No se pudo copiar la sugerencia'
       }
     })
 

@@ -4,8 +4,13 @@ AI-generated follow-up prompt suggestions for [Hermes Agent](https://github.com/
 
 After each completed turn, Hermes quietly asks the model whether there is a
 natural next step and, if there is, shows it as a small pill under the
-composer. Click it to drop the text into the composer (it is **not** sent —
-edit it or press Enter yourself). Click **×** to dismiss it.
+composer. Click it to use the text — it is **never** sent for you. Click
+**×** to dismiss it.
+
+On Hermes Desktop builds with the plugin SDK's composer API
+(`host.composer.insertText`), the click puts the text straight into the
+composer. On earlier builds it copies the text to the clipboard and tells
+you so; paste it with Ctrl/⌘+V.
 
 ## Install
 
@@ -76,9 +81,11 @@ plugins:
 - **Pill, not ghost text.** The plugin SDK does not expose the composer's
   input, so the suggestion lives in `composer.underside`, a first-class
   extension area.
-- **Insert, don't send.** Clicking uses the composer's insert event, so you
-  always review the text before it goes out. If no composer is visible, the
-  text is copied to the clipboard instead.
+- **Insert, don't send.** The click only ever places the text for you to
+  review. The bundle stays inside the plugin SDK: it uses
+  `host.composer.insertText` when the host has it and falls back to the
+  clipboard otherwise — it never touches the app's composer DOM or internal
+  events, so composer changes can't break it silently.
 - **Poll, not push.** `ctx.socket` is a no-op on OAuth remote backends, so the
   desktop half polls (every 2 s right after a turn, every 20 s otherwise).
 - **No suggestion beats a bad one.** The model is told to answer `NULL` when

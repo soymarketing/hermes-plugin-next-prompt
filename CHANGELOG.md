@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Desktop half is SDK-only (catalog rule 8): the pill uses
+  `host.composer.insertText` when the host provides it (Desktop plugin SDK
+  hook 1) and otherwise copies the suggestion to the clipboard with a notice.
+  Removed the `[data-composer-target]` lookup and the internal
+  `hermes:composer-*` window events.
+- A clipboard failure is now reported instead of silently ignored.
+
 ## 0.2.0
 
 - Suggestions persist per chat (profile `plugin-data`) until used, dismissed,
