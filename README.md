@@ -41,8 +41,9 @@ Then restart Hermes Desktop and turn **Next Prompt** on in
 ## How it works
 
 1. **`post_llm_call` hook** — when a turn finishes in a Desktop/TUI session,
-   a background worker asks `ctx.llm` for one short follow-up, or `NULL` when
-   the agent is waiting for your answer or there is nothing to act on.
+   a background worker asks `ctx.llm` for the message you are most likely to
+   send next: your answer when the agent asked you something, otherwise a
+   next step. `NULL` only when the exchange is just a thank-you.
 2. **Stays until you act on it** — the suggestion is kept per chat in the
    plugin's data directory (`ctx.state.data_dir`, under the profile's
    `plugin-data/`), so switching screens or chats, or a backend restart, does
@@ -124,11 +125,14 @@ plugins:
   events, so composer changes can't break it silently.
 - **Poll, not push.** `ctx.socket` is a no-op on OAuth remote backends, so the
   desktop half polls (every 2 s right after a turn, every 20 s otherwise).
-- **Suggest, never answer for you.** Most finished turns have a useful next
-  step (verify it, apply it elsewhere, dig into a detail), so the model is
-  asked to find one. It stays silent when the agent asked you a question,
-  offered a choice or needs information only you have, and when the exchange
-  is just a thank-you. It never reports actions you haven't taken.
+- **Your likely reply, ready to edit.** When the agent ends with a question,
+  a choice or a yes/no offer, the suggestion is the answer you would most
+  likely type — the option the conversation or the agent favours — so you
+  can send it as is or change a word first. Parts only you know become a
+  bracketed placeholder (`Send it to [email address]`); it never invents a
+  result you haven't seen and never includes a password. Otherwise it offers
+  the natural next step (verify it, apply it elsewhere, dig into a detail).
+  Nothing is sent until you press send: the pill only fills the input.
 - **Your language.** The suggestion follows the language of your last
   message, not the topic's.
 

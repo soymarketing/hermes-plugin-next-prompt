@@ -283,11 +283,15 @@ class ContextAndCleanTests(unittest.TestCase):
             "Run the tests\nBecause the fix touched auth.py": "Run the tests",
             "NULL": "",
             "null.": "",
-            "NULL — the agent asked a question": "",
+            "NULL — nothing to act on": "",
             "None": "",
             "": "",
             "ok": "",
             "x" * 200: "",
+            # A reply to the agent's question, with a placeholder for the part
+            # only the user knows, survives untouched.
+            "Envíala a [correo del cliente]": "Envíala a [correo del cliente]",
+            "Sí, despliégalo a producción": "Sí, despliégalo a producción",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw[:40]):

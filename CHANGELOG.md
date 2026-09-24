@@ -15,8 +15,13 @@
     longer push your request out of the window. Long replies keep their
     ending, where conclusions and questions are.
   - The prompt now expects a next step on most turns instead of defaulting
-    to `NULL`, never answers the agent's question for you, never claims you
-    did something, and follows the language of your last message.
+    to `NULL`, and follows the language of your last message.
+  - **When the agent asks you something, the suggestion is your likely
+    answer**, ready to send or tweak: the option the conversation or the
+    agent favours, a yes to a proposal that matches your request, or a
+    bracketed placeholder for what only you know (`[email address]`). It
+    never invents a result you haven't seen and never includes a password.
+    `NULL` is left for closed exchanges (thanks, goodbye).
   - Lower temperature (0.3); the output cleaner also strips labels,
     markdown, smart quotes and `NULL` variants.
   - Measured on 14 cases × 3 runs: Opus 5.5 42/42, Sonnet 5 42/42,
