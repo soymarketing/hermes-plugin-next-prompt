@@ -1,5 +1,5 @@
 name: next-prompt
-version: 0.2.1
+version: 0.3.0
 manifest_version: 2
 api_version: 1
 description: AI-generated follow-up prompt suggestions under the Desktop composer after each turn.
@@ -20,7 +20,7 @@ config_schema:
   max_context_messages:
     type: int
     default: 4
-    description: "Number of recent messages to include for context (2-10)"
+    description: "Context size in messages: your last N/2 requests plus the agent's final reply to each (2-10)"
   cooldown_seconds:
     type: int
     default: 3

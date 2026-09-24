@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+
+- **Keyboard and palette.** Ctrl/⌘+Shift+Y uses the suggestion shown in the
+  focused chat (rebindable in Settings → Keybinds); the command palette gets
+  *Next Prompt: use suggestion* (with a preview) and *dismiss suggestion*.
+- **Failures are visible.** When a suggestion can't be generated, a muted,
+  dismissible note says why (credentials rejected, rate limit, timeout,
+  other) with a hint, instead of failing silently. The provider's error text
+  is never shown.
+- **Better suggestions.**
+  - Context is your recent requests plus the agent's final reply to each;
+    tool traffic and intermediate notes are skipped, so tool-heavy turns no
+    longer push your request out of the window. Long replies keep their
+    ending, where conclusions and questions are.
+  - The prompt now expects a next step on most turns instead of defaulting
+    to `NULL`, never answers the agent's question for you, never claims you
+    did something, and follows the language of your last message.
+  - Lower temperature (0.3); the output cleaner also strips labels,
+    markdown, smart quotes and `NULL` variants.
+  - Measured on 14 cases × 3 runs: Opus 5.5 42/42, Sonnet 5 42/42,
+    GPT-6-luna 40/42 (up from 6/10 on 0.2.x).
+- README documents how to pick the model (`auxiliary.next_prompt`) with the
+  measurements.
+- Tests and CI in the repository: backend and Desktop suites, a check that
+  every SDK import exists, and `hermes plugins validate` on every push.
+
 ## 0.2.1
 
 - Desktop half is SDK-only (catalog rule 8): the pill uses
