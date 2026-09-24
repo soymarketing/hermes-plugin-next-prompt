@@ -9,7 +9,7 @@
  * When the suggestion could not be generated, a muted note says why instead.
  */
 
-import { atom, cn, Codicon, haptic, host, Tip, usePluginI18n, useQuery, useValue } from '@hermes/plugin-sdk'
+import { atom, cn, Codicon, haptic, host, KEYBINDS_AREA, PALETTE_AREA, Tip, usePluginI18n, useQuery, useValue } from '@hermes/plugin-sdk'
 import { useEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -33,6 +33,14 @@ const FAST_POLL_MS = 2000
 const SLOW_POLL_MS = 20000
 const FAST_WINDOW_MS = 45000
 const FAILURE_KINDS = new Set(['auth', 'rate_limit', 'timeout', 'other'])
+// Unused by the app, its editors and the OS menus; a primary-modifier chord
+// also fires while typing in the composer. Rebindable in Settings → Keybinds;
+// the palette row shows the live binding.
+const USE_COMBO = 'mod+shift+y'
+
+/** What the strip shows right now, for the keybind and palette commands:
+ *  `{ storedId, suggestion, handledKey }` or null. Written during render. */
+let visible = null
 
 // ── composer insertion ───────────────────────────────────────────────────
 // SDK only. `host.composer.insertText` (Desktop plugin SDK hook 1, #116305)
@@ -63,6 +71,50 @@ function dismissOnServer(storedId) {
   pluginCtx.rest(`/dismiss?session_id=${encodeURIComponent(storedId)}`, { method: 'POST' }).catch(() => {})
 }
 
+// ── actions (pill click, keybind, palette) ───────────────────────────────
+
+function finish(entry) {
+  $handled.set(entry.handledKey)
+  if (visible && visible.handledKey === entry.handledKey) visible = null
+  dismissOnServer(entry.storedId)
+}
+
+async function useSuggestion(entry) {
+  const text = entry.suggestion.text
+  finish(entry)
+  if (await insertIntoComposer(text)) return
+  if (!pluginCtx) return
+  try {
+    await pluginCtx.os.writeClipboard(text)
+    host.notify({ kind: 'info', message: pluginCtx.i18n.t('copied') })
+  } catch (error) {
+    host.notifyError(error, pluginCtx.i18n.t('copyFailed'))
+  }
+}
+
+/** The suggestion on screen for the focused chat, if any. Read at call time,
+ *  so a stale render never acts on another chat. */
+function current() {
+  const focused = host.state.focusedStoredSessionId.get()
+  if (!visible || !focused || visible.storedId !== focused || host.state.busy.get()) return null
+  return visible
+}
+
+function useVisibleSuggestion() {
+  const entry = current()
+  if (!entry) {
+    if (pluginCtx) host.notify({ kind: 'info', message: pluginCtx.i18n.t('nothingToUse') })
+    return
+  }
+  haptic('tap')
+  void useSuggestion(entry)
+}
+
+function dismissVisibleSuggestion() {
+  const entry = current()
+  if (entry) finish(entry)
+}
+
 // ── UI ───────────────────────────────────────────────────────────────────
 
 const rowClass = 'flex min-w-0 items-center justify-start'
@@ -70,29 +122,16 @@ const closeClass = 'ml-1 shrink-0 rounded-full p-0.5 opacity-50 hover:opacity-10
 
 function SuggestionPill({ storedId, suggestion, handledKey }) {
   const t = usePluginI18n(ID)
+  const entry = { storedId, suggestion, handledKey }
 
-  const finish = () => {
-    $handled.set(handledKey)
-    dismissOnServer(storedId)
-  }
-
-  const onUse = async () => {
+  const onUse = () => {
     haptic('tap')
-    const text = suggestion.text
-    finish()
-    if (await insertIntoComposer(text)) return
-    if (!pluginCtx) return
-    try {
-      await pluginCtx.os.writeClipboard(text)
-      host.notify({ kind: 'info', message: t('copied') })
-    } catch (error) {
-      host.notifyError(error, t('copyFailed'))
-    }
+    return useSuggestion(entry)
   }
 
   const onDismiss = event => {
     event.stopPropagation()
-    finish()
+    finish(entry)
   }
 
   return jsx('div', {
@@ -129,10 +168,7 @@ function FailureNote({ storedId, failure, handledKey }) {
   const t = usePluginI18n(ID)
   const kind = FAILURE_KINDS.has(failure.kind) ? failure.kind : 'other'
 
-  const onDismiss = () => {
-    $handled.set(handledKey)
-    dismissOnServer(storedId)
-  }
+  const onDismiss = () => finish({ storedId, handledKey })
 
   return jsx('div', {
     className: rowClass,
@@ -164,6 +200,7 @@ function SuggestionStrip() {
   const storedId = useValue(host.state.focusedStoredSessionId)
   const busy = useValue(host.state.busy)
   const handled = useValue($handled)
+  visible = null
 
   // Per session, never global: another chat working (or switching screens)
   // must not hide this chat's suggestion.
@@ -199,6 +236,7 @@ function SuggestionStrip() {
   if (mine(suggestion) && suggestion.text) {
     const handledKey = `${storedId}:suggestion:${suggestion.timestamp}`
     if (handled === handledKey) return null
+    visible = { storedId, suggestion, handledKey }
     return jsx(SuggestionPill, { storedId, suggestion, handledKey })
   }
 
@@ -225,6 +263,9 @@ export default {
       en: {
         tip: 'Click to use this follow-up',
         dismiss: 'Dismiss suggestion',
+        useLabel: 'Next Prompt: use suggestion',
+        dismissLabel: 'Next Prompt: dismiss suggestion',
+        nothingToUse: 'No follow-up suggestion in this chat right now',
         copied: 'Suggestion copied — paste it into the composer',
         copyFailed: 'Could not copy the suggestion',
         failure: {
@@ -242,6 +283,9 @@ export default {
       es: {
         tip: 'Clic para usar este seguimiento',
         dismiss: 'Descartar sugerencia',
+        useLabel: 'Next Prompt: usar sugerencia',
+        dismissLabel: 'Next Prompt: descartar sugerencia',
+        nothingToUse: 'No hay sugerencia de seguimiento en este chat ahora',
         copied: 'Sugerencia copiada — pégala en el compositor',
         copyFailed: 'No se pudo copiar la sugerencia',
         failure: {
@@ -265,8 +309,46 @@ export default {
       render: () => jsx(SuggestionStrip, {})
     })
 
+    const t = key => ctx.i18n.t(key)
+    ctx.registerMany([
+      {
+        id: 'use-keybind',
+        area: KEYBINDS_AREA,
+        data: {
+          id: 'next-prompt.use',
+          label: t('useLabel'),
+          category: 'composer',
+          defaults: [USE_COMBO],
+          run: useVisibleSuggestion
+        }
+      },
+      {
+        id: 'use-command',
+        area: PALETTE_AREA,
+        data: {
+          id: 'next-prompt.use',
+          label: t('useLabel'),
+          action: 'next-prompt.use',
+          keywords: ['next prompt', 'suggestion', 'follow-up', 'sugerencia'],
+          detail: () => current()?.suggestion.text || t('nothingToUse'),
+          run: useVisibleSuggestion
+        }
+      },
+      {
+        id: 'dismiss-command',
+        area: PALETTE_AREA,
+        data: {
+          id: 'next-prompt.dismiss',
+          label: t('dismissLabel'),
+          keywords: ['next prompt', 'suggestion', 'dismiss', 'descartar'],
+          run: dismissVisibleSuggestion
+        }
+      }
+    ])
+
     ctx.onDispose(() => {
       pluginCtx = null
+      visible = null
       reportedError = false
     })
   }

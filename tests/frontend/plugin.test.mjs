@@ -197,3 +197,95 @@ test('the failure note is hidden while the chat works', async () => {
   view('A', true)
   assert.equal(note(), null)
 })
+
+// ── keybind + palette ─────────────────────────────────────────────────────
+
+const byArea = area => ctx.contributions.filter(c => c.area === area).map(c => c.data)
+const keybind = () => byArea('keybinds').find(k => k.id === 'next-prompt.use')
+const command = id => byArea('palette').find(p => p.id === id)
+
+test('registers a rebindable keybind and palette commands', () => {
+  const k = keybind()
+  assert.ok(k, 'keybind registered')
+  assert.deepEqual(k.defaults, ['mod+shift+y'])
+  assert.equal(k.category, 'composer')
+  assert.equal(typeof k.label, 'string')
+  assert.equal(command('next-prompt.use').action, 'next-prompt.use', 'palette row shows the live combo')
+  assert.ok(command('next-prompt.dismiss'))
+})
+
+test('the keybind default does not collide with a built-in desktop binding', () => {
+  // Built-in defaults as of Desktop 0.21 (lib/keybinds/actions.ts + read-only composer keys).
+  const taken = new Set([
+    'mod+shift+m', 'mod+shift+]', 'mod+shift+[', 'mod+shift+0', 'mod+shift+n', 'mod+shift+f', 'mod+shift+b',
+    'mod+shift+s', 'mod+shift+l', 'mod+shift+h', 'mod+shift+t', 'mod+shift+k', 'mod+shift+c', 'mod+shift+g',
+    'mod+shift+v', 'mod+enter', 'shift+enter', 'mod+k', 'mod+p', 'mod+l', 'mod+z', 'mod+y', 'ctrl+y', 'mod+shift+z'
+  ])
+  for (const combo of keybind().defaults) assert.ok(!taken.has(combo), `${combo} is taken`)
+})
+
+test('the keybind uses the suggestion shown in the focused chat', async () => {
+  resetCalls()
+  host.composer = { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) }
+  view('A')
+  serve('A', suggestion('A', 'Por atajo'))
+  render()
+  assert.equal(command('next-prompt.use').detail(), 'Por atajo', 'palette row previews the text')
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.insert, [[null, 'Por atajo', { mode: 'block' }]])
+  assert.equal(pillText(), null, 'used suggestion disappears')
+  delete host.composer
+})
+
+test('the keybind never acts on another chat’s suggestion', async () => {
+  resetCalls()
+  view('A')
+  serve('A', suggestion('A', 'De A'))
+  render()
+  view('B') // switched chats; no render yet
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.clip, [])
+  assert.deepEqual(calls.insert, [])
+  assert.equal(calls.notify.at(-1)?.message, 'nothingToUse')
+})
+
+test('the keybind does nothing while the chat works, or with no suggestion', async () => {
+  resetCalls()
+  view('A')
+  serve('A', suggestion('A', 'Ocupado'))
+  render()
+  host.state.busy.set(true)
+  keybind().run()
+  host.state.busy.set(false)
+  view('C')
+  serve('C', null)
+  render()
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.clip, [])
+  assert.equal(calls.notify.filter(n => n.message === 'nothingToUse').length, 2)
+})
+
+test('the keybind ignores a failure note', async () => {
+  resetCalls()
+  view('A')
+  serve('A', null, failure('A', 'auth'))
+  render()
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.clip, [])
+  assert.ok(note(), 'the note stays')
+})
+
+test('palette dismiss clears the visible suggestion', () => {
+  resetCalls()
+  view('A')
+  serve('A', suggestion('A', 'Quítame'))
+  render()
+  command('next-prompt.dismiss').run()
+  assert.equal(pillText(), null)
+  assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+  assert.deepEqual(calls.clip, [])
+})
