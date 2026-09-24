@@ -17,15 +17,18 @@
   - The prompt now expects a next step on most turns instead of defaulting
     to `NULL`, and follows the language of your last message.
   - **When the agent asks you something, the suggestion is your likely
-    answer**, ready to send or tweak: the option the conversation or the
-    agent favours, a yes to a proposal that matches your request, or a
-    bracketed placeholder for what only you know (`[email address]`). It
-    never invents a result you haven't seen and never includes a password.
-    `NULL` is left for closed exchanges (thanks, goodbye).
+    answer**, ready to send or tweak, committed to one option: the one the
+    conversation or the agent favours, or a yes to a proposal that matches
+    your request. Asked to try something and report back, it confirms you
+    did it with the most likely outcome. Never a list of options or a blank
+    to fill in (the output cleaner drops any that slip through), never a
+    password. `NULL` is left for closed exchanges (thanks, goodbye) and for
+    answers only you know, such as an email address.
   - Lower temperature (0.3); the output cleaner also strips labels,
     markdown, smart quotes and `NULL` variants.
-  - Measured on 14 cases × 3 runs: Opus 5.5 42/42, Sonnet 5 42/42,
-    GPT-6-luna 40/42 (up from 6/10 on 0.2.x).
+  - Measured on 16 cases (4 real exchanges scored against the reply actually
+    sent): Opus 5.5 30/32, Sonnet 5 43/48, GPT-6-luna 25/32 (up from 6/10
+    on 0.2.x, where questions from the agent got no suggestion at all).
 - README documents how to pick the model (`auxiliary.next_prompt`) with the
   measurements.
 - Tests and CI in the repository: backend and Desktop suites, a check that

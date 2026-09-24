@@ -12,6 +12,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -149,52 +150,57 @@ suggestion never sends anything, so a good guess saves the user from typing \
 it and a wrong one costs nothing.
 
 If the agent's last message asks the user something (a question, a choice, \
-a yes/no offer, a request for a detail), write the user's most likely reply, \
-in their own words: pick the option the conversation favours or the agent \
-recommends, answer yes to a proposal that matches what the user asked for, \
-and include the requested detail when the conversation contains it. If a \
-reply needs something only the user knows (an email address, a date, a \
-personal preference nothing hints at), write the reply with a short \
-placeholder in brackets for that part. Never put a password or secret in a \
-suggestion.
+a yes/no offer, a request to try something and report back), write the \
+user's most likely reply, in their own words, committed to ONE answer: pick \
+the option the conversation favours or the agent recommends, answer yes to a \
+proposal that matches what the user asked for, and include the requested \
+detail when the conversation contains it. When the agent asked them to try \
+something and report back, confirm they did it and give the most likely \
+outcome; the user corrects it if it went differently. When the agent asked \
+for several things (to confirm a step and to decide something), cover each \
+briefly, the confirmation first.
 
 Otherwise suggest the natural next step: verify or test what was just done, \
 apply it somewhere related, drill into a detail the agent surfaced, or move \
 to the next pending item the agent mentioned.
 
-Answer exactly NULL only when the exchange is closed socially (thanks, \
-goodbye) with nothing left to act on.
+Answer exactly NULL when:
+- the exchange is closed socially (thanks, goodbye) with nothing left to act \
+on; or
+- the reply is mostly a detail only the user knows and the conversation does \
+not contain (an email address, a password, a name): a guess would be wrong \
+and a blank saves nothing.
 
 Writing rules:
 - Write in the language of the user's last message, whatever the language \
 of the topic, the names in it, or these instructions.
 - One short message under 80 characters, phrased the way the user writes to \
 the agent: a reply to the agent's question, or a request (usually imperative).
-- The user has done nothing yet: they will click the suggestion later. You \
-may confirm an action the agent asked them to do ("Done, I restarted it"), \
-since they send it only after doing it; when the agent asked them to do \
-something and report back, start with that confirmation. Never invent its \
-result or anything they would observe ("it works now", "the button \
-appeared"). When the agent asks what they saw, leave a bracketed placeholder \
-for the result. A bracket names what the user fills in ([result], [email \
-address]); never put a guessed value inside it.
+- Ready to send as is: no brackets, blanks, placeholders or lists of \
+alternatives ("X / Y", "X or Y?"). Deleting the options that don't apply is \
+as much work as typing the message.
 - Specific to this conversation: use its names, files and numbers. Never \
-generic ("Continue", "Tell me more", "Sounds good").
+generic ("Continue", "Tell me more", "Sounds good", "Thanks, looks good"): \
+when the work is done, suggest how to verify, ship or extend it.
 - Never ask for something the agent already did or already answered.
+- Never include a password or other secret.
 - Output only the suggestion, or NULL. No quotes, labels or explanation.
 
 Examples (the language always follows the user, never the example):
 User: "Fix the parser crash" Agent: "Fixed the null check in parser.py; all 42 tests pass." -> Commit the parser.py fix
+User: "Compare our two hosting plans" Agent: "Plan B is 30% cheaper but has half the bandwidth." -> How much bandwidth did we use last month?
 User: "Resume las ventas de agosto" Agent: "312 pedidos; Monterrey cayó 18%." -> ¿Por qué cayeron las ventas en Monterrey?
-User: "Fix the login bug" Agent: "Done. Restart the app to try it." -> Add a test that covers the login bug
 User: "Deploy the site" Agent: "Build is ready. Staging first, or straight to production? I'd go staging." -> Deploy to staging first
 User: "Email the report to the team" Agent: "Want me to attach the Q3 chart too?" -> Yes, attach the Q3 chart
-User: "Send the invoice" Agent: "I don't have the client's email. Which address?" -> Send it to [email address]
-User: "The export button does nothing" Agent: "Fixed. Restart the app and tell me if it works." -> Restarted: the export button [works / still fails]
+User: "The export button does nothing" Agent: "Fixed. Restart the app and tell me if it works." -> Restarted it, and the export button works now
+User: "Send the invoice" Agent: "I don't have the client's email. Which address?" -> NULL
 User: "Perfect, thanks!" Agent: "Anytime!" -> NULL
 """
 
-_LANGUAGE_REMINDER = "Write the suggestion in the same language as the user's last message: \"{sample}\""
+_LANGUAGE_REMINDER = (
+    "Write the suggestion in the same language as the user's last message, even "
+    "when the topic, places or names belong to another language: \"{sample}\""
+)
 _LANGUAGE_SAMPLE_CHARS = 200
 
 
@@ -226,6 +232,9 @@ _MAX_SUGGESTION_CHARS = 160
 _NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
 _LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
+# "[result]", "[works / fails]", "<email>", "___": the user would have to edit
+# it before sending, which is as much work as typing it.
+_FILL_IN = re.compile(r"\[[^\]]*\]|<[^<>]+>|_{3,}")
 
 
 def _text_of(msg: Dict[str, Any]) -> str:
@@ -280,6 +289,8 @@ def _clean(text: str) -> str:
         if lowered.startswith(label):
             text = text[len(label):].strip()
             break
+    if _FILL_IN.search(text):
+        return ""  # a blank to fill in or options to delete saves no typing
     text = text.strip("*_ ").strip()
     if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
         text = text[1:-1].strip()

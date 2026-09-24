@@ -265,7 +265,8 @@ class ContextAndCleanTests(unittest.TestCase):
         self.assertEqual(system["role"], "system")
         tail = user["content"].rsplit("\n\n", 1)[1]
         self.assertIn('"Now compare Stripe and Mercado Pago fees in Mexico', tail, "whitespace collapsed, quoted")
-        self.assertLess(len(tail), 300, "the sample is capped")
+        sample = tail.split('"', 1)[1].rsplit('"', 1)[0]
+        self.assertLessEqual(len(sample), self.m._LANGUAGE_SAMPLE_CHARS + 1, "the sample is capped")
 
     def test_language_reminder_without_a_user_message(self):
         self.assertEqual(self.m._last_user_text([{"role": "assistant", "content": "hola"}]), "")
@@ -288,10 +289,14 @@ class ContextAndCleanTests(unittest.TestCase):
             "": "",
             "ok": "",
             "x" * 200: "",
-            # A reply to the agent's question, with a placeholder for the part
-            # only the user knows, survives untouched.
-            "Envíala a [correo del cliente]": "Envíala a [correo del cliente]",
+            # A reply to the agent's question survives untouched...
             "Sí, despliégalo a producción": "Sí, despliégalo a producción",
+            "Reinicié y el botón ya funciona": "Reinicié y el botón ya funciona",
+            # ...but anything the user must edit before sending is dropped.
+            "Envíala a [correo del cliente]": "",
+            "Probé la pill: [funcionó / no salió / salió pero con error]": "",
+            "Send it to <email address>": "",
+            "My email is ___": "",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw[:40]):

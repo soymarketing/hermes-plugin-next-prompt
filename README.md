@@ -73,19 +73,23 @@ interactively with `hermes model` → **Auxiliary** → **Next Prompt**. (Deskto
 Settings → Models → Auxiliary lists only Hermes' built-in tasks.) The change
 applies from the next suggestion; no restart needed.
 
-Measured with this version's prompt on 14 conversations (English and Spanish;
-8 where a follow-up fits, 6 where the right answer is silence), each run three
-times:
+Measured with this version's prompt on 16 conversations in English and
+Spanish (6 where a next step fits, 8 where the agent asked you something, 2
+where the right answer is silence; 4 of them are real exchanges scored
+against the reply actually sent), each run two or three times and scored by
+an LLM judge:
 
 | Model | Correct | Median latency | Notes |
 |---|---|---|---|
-| `claude-opus-5-5` | 42/42 | 1.7 s | Most useful suggestions; the most expensive |
-| `claude-sonnet-5` | 42/42 | 1.3 s | Recommended balance |
-| `gpt-6-luna` (reasoning off) | 40/42 | 1.6 s | ~20× cheaper than Sonnet; sometimes follows the topic's language instead of yours |
+| `claude-opus-5-5` | 30/32 | 1.5 s | Most useful suggestions; the most expensive |
+| `claude-sonnet-5` | 43/48 | 1.2 s | Recommended balance |
+| `gpt-6-luna` (reasoning off) | 25/32 | 1.8 s | Much cheaper; sometimes follows the topic's language instead of yours, or stays silent when a reply fits |
 
-"Correct" means it suggested when it should and stayed silent when it
-should, wrote in the user's language, and did not claim the user had done
-something.
+"Correct" means the user would send it as is or after changing a word or
+two, in their language, committed to one answer (no options or blanks), and
+silence exactly where it should be. The misses all three share: when you
+report on a test, the suggestion assumes it went well, so you fix a word
+when it didn't.
 
 Plugin settings:
 
@@ -125,14 +129,18 @@ plugins:
   events, so composer changes can't break it silently.
 - **Poll, not push.** `ctx.socket` is a no-op on OAuth remote backends, so the
   desktop half polls (every 2 s right after a turn, every 20 s otherwise).
-- **Your likely reply, ready to edit.** When the agent ends with a question,
+- **Your likely reply, ready to send.** When the agent ends with a question,
   a choice or a yes/no offer, the suggestion is the answer you would most
-  likely type — the option the conversation or the agent favours — so you
-  can send it as is or change a word first. Parts only you know become a
-  bracketed placeholder (`Send it to [email address]`); it never invents a
-  result you haven't seen and never includes a password. Otherwise it offers
-  the natural next step (verify it, apply it elsewhere, dig into a detail).
-  Nothing is sent until you press send: the pill only fills the input.
+  likely type, committed to one option: the one the conversation or the
+  agent favours, or yes to a proposal that matches what you asked for. When
+  the agent asks you to try something and report back, it confirms you did
+  it with the most likely outcome; you change a word if it went differently.
+  It never offers a list of options or a blank to fill in, since deleting
+  options is as much work as typing, and a suggestion that comes back with
+  brackets anyway is dropped. When the answer is a detail only you know (an
+  email address), it shows nothing. It never includes a password. Otherwise
+  it offers the natural next step (verify it, apply it elsewhere, dig into a
+  detail). Nothing is sent until you press send: the pill only fills the input.
 - **Your language.** The suggestion follows the language of your last
   message, not the topic's.
 
