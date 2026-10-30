@@ -32,8 +32,22 @@ jobs:
         with:
           node-version: "22"
 
+      # hermes-agent resolves its dependencies with uv and relies on
+      # [tool.uv] override-dependencies (e.g. Pillow 13 over browser-harness's
+      # exact pillow==12.3.0 pin). Plain pip ignores those overrides and fails
+      # with ResolutionImpossible, so install with uv and pass hermes-agent's
+      # own override list, read from its pyproject.toml so it stays in sync.
       - name: Install hermes-agent
-        run: pip install -e ./hermes-agent
+        run: |
+          python -m pip install uv
+          python - > "$RUNNER_TEMP/hermes-overrides.txt" <<'EOF'
+          import tomllib
+          with open("hermes-agent/pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          print("\n".join(data.get("tool", {}).get("uv", {}).get("override-dependencies", [])))
+          EOF
+          cat "$RUNNER_TEMP/hermes-overrides.txt"
+          uv pip install --system --override "$RUNNER_TEMP/hermes-overrides.txt" -e ./hermes-agent
 
       - name: Validate the plugin (same gate as the catalog CI)
         run: |
