@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - **⌘/Ctrl-click the pill to send the suggestion immediately** through
   `host.composer.submit`, skipping the review step. A plain click, the keybind
