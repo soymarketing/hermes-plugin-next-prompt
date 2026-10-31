@@ -111,6 +111,59 @@ test('click inserts through host.composer.insertText when the host has it', asyn
   delete host.composer
 })
 
+test('⌘/Ctrl-click sends through host.composer.submit and skips the composer insert', async () => {
+  for (const mods of [{ metaKey: true }, { ctrlKey: true }]) {
+    resetCalls()
+    const sent = []
+    host.composer = {
+      insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true),
+      submit: (sid, text) => (sent.push([sid, text]), true)
+    }
+    view('A')
+    serve('A', suggestion('A', 'Mándalo ya'))
+    await pill().props.onClick(mods)
+    assert.deepEqual(sent, [['A', 'Mándalo ya']])
+    assert.deepEqual(calls.insert, [])
+    assert.equal(pillText(), null, 'used suggestion disappears')
+    assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+  }
+  delete host.composer
+})
+
+test('a plain or Shift/Alt click never sends', async () => {
+  for (const ev of [undefined, {}, { shiftKey: true }, { altKey: true }]) {
+    resetCalls()
+    const sent = []
+    host.composer = {
+      insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true),
+      submit: (sid, text) => (sent.push([sid, text]), true)
+    }
+    view('A')
+    serve('A', suggestion('A', 'Sólo inserta'))
+    await pill().props.onClick(ev)
+    assert.deepEqual(sent, [])
+    assert.deepEqual(calls.insert, [[null, 'Sólo inserta', { mode: 'block' }]])
+  }
+  delete host.composer
+})
+
+test('⌘-click falls back to inserting when submit is unavailable or refuses', async () => {
+  const hosts = [
+    { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) },
+    { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true), submit: () => false },
+    { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true), submit: () => { throw new Error('x') } }
+  ]
+  for (const composer of hosts) {
+    resetCalls()
+    host.composer = composer
+    view('A')
+    serve('A', suggestion('A', 'Respaldo'))
+    await pill().props.onClick({ metaKey: true })
+    assert.deepEqual(calls.insert, [[null, 'Respaldo', { mode: 'block' }]])
+  }
+  delete host.composer
+})
+
 test('click falls back to the clipboard when insertion is unavailable', async () => {
   const hosts = [undefined, { insertText: async () => false }, { insertText: async () => { throw new Error('x') } }, { insertText: 'nope' }]
   for (const composer of hosts) {

@@ -5,7 +5,8 @@
  * `ctx.rest`, which routes to the right backend and carries auth) for an
  * AI-generated follow-up and shows it as a subtle pill below the composer.
  * Click → the text goes into the composer (not sent) through the SDK's
- * `host.composer`, or to the clipboard on hosts without it. × → dismiss.
+ * `host.composer`, or to the clipboard on hosts without it. ⌘/Ctrl-click sends
+ * it straight away through `host.composer.submit`. × → dismiss.
  * When the suggestion could not be generated, a muted note says why instead.
  */
 
@@ -79,9 +80,26 @@ function finish(entry) {
   dismissOnServer(entry.storedId)
 }
 
-async function useSuggestion(entry) {
+/** Send the text as a message right away. Only an explicit ⌘/Ctrl-click asks
+ *  for this; every other path stays "put it in the composer, you decide". */
+function sendFromComposer(storedId, text) {
+  const composer = host.composer
+  if (!storedId || !composer || typeof composer.submit !== 'function') return false
+  try {
+    return composer.submit(storedId, text) === true
+  } catch {
+    return false
+  }
+}
+
+/** ⌘-click (Mac) or Ctrl-click (elsewhere) on the pill. */
+const wantsSend = event => Boolean(event && (event.metaKey || event.ctrlKey))
+
+async function useSuggestion(entry, { send = false } = {}) {
   const text = entry.suggestion.text
   finish(entry)
+  // If sending is unavailable, fall back to the normal insert so nothing is lost.
+  if (send && sendFromComposer(entry.storedId, text)) return
   if (await insertIntoComposer(text)) return
   if (!pluginCtx) return
   try {
@@ -124,9 +142,9 @@ function SuggestionPill({ storedId, suggestion, handledKey }) {
   const t = usePluginI18n(ID)
   const entry = { storedId, suggestion, handledKey }
 
-  const onUse = () => {
+  const onUse = event => {
     haptic('tap')
-    return useSuggestion(entry)
+    return useSuggestion(entry, { send: wantsSend(event) })
   }
 
   const onDismiss = event => {
@@ -261,7 +279,7 @@ export default {
 
     ctx.i18n.register({
       en: {
-        tip: 'Click to use this follow-up',
+        tip: 'Click to put this follow-up in the composer · ⌘/Ctrl-click to send it now',
         dismiss: 'Dismiss suggestion',
         useLabel: 'Next Prompt: use suggestion',
         dismissLabel: 'Next Prompt: dismiss suggestion',
@@ -281,7 +299,7 @@ export default {
         }
       },
       es: {
-        tip: 'Clic para usar este seguimiento',
+        tip: 'Clic para ponerlo en el compositor · ⌘/Ctrl-clic para enviarlo ya',
         dismiss: 'Descartar sugerencia',
         useLabel: 'Next Prompt: usar sugerencia',
         dismissLabel: 'Next Prompt: descartar sugerencia',

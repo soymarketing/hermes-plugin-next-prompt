@@ -10,7 +10,7 @@ under the composer:
   dig into a detail.
 
 Click it, or press **Ctrl/⌘+Shift+Y**, and the text lands in the composer for
-you to review. **Nothing is ever sent for you.**
+you to review. **Nothing is sent unless you ⌘/Ctrl-click the pill.**
 
 ## Install
 
@@ -44,6 +44,11 @@ or *dismiss suggestion*:
   shortcut only acts on the suggestion shown in the chat you are looking at,
   and does nothing while that chat is working. Change it in
   **Settings → Keybinds**.
+- **⌘-click (Ctrl-click on Linux/Windows)** the pill to send the suggestion
+  right away instead of reviewing it first. A plain click, the keybind and the
+  palette command still only fill the composer; nothing is sent unless you
+  hold the modifier. If the host cannot submit, it falls back to filling the
+  composer.
 - **Click ×** to dismiss it. Sending your own message clears it too.
 - **It stays until you act on it.** Switching chats or screens, or restarting
   the backend, does not lose it. Stale suggestions expire after 7 days.

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **⌘/Ctrl-click the pill to send the suggestion immediately** through
+  `host.composer.submit`, skipping the review step. A plain click, the keybind
+  and the palette command are unchanged and still never send. If the host has
+  no `submit`, or refuses, it falls back to filling the composer.
+
 ## 0.3.1
 
 - **Fix: no suggestions on a gateway that serves several profiles.** Since
