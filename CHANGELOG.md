@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3
+
+- **A clear note when the model's provider is unavailable.** When the
+  provider pinned in `auxiliary.next_prompt` has no usable credentials (a
+  subscription limit, a missing login) and no fallback took over, the note
+  under the composer now says so and points to `fallback_chain`, instead of
+  the generic "could not generate a suggestion".
+- **README: "Add a fallback".** How to give the plugin's auxiliary task a
+  backup provider; the main model's `fallback_providers` does not cover it.
+
 ## 0.3.2
 
 - **⌘/Ctrl-click the pill to send the suggestion immediately** through

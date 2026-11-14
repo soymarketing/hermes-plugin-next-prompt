@@ -78,6 +78,28 @@ interactively with `hermes model` → **Auxiliary** → **Next Prompt**. (Deskto
 Settings → Models → Auxiliary lists only Hermes' built-in tasks.) The change
 applies from the next suggestion; no restart needed.
 
+### Add a fallback
+
+Once you pin a provider, suggestions stop whenever that provider is out:
+a subscription limit, an expired login. Your main model's
+`fallback_providers` keeps the chat going, but it does **not** cover a pinned
+auxiliary task. Give the task its own backup in `config.yaml`:
+
+```yaml
+auxiliary:
+  next_prompt:
+    provider: anthropic
+    model: claude-sonnet-5
+    fallback_chain:
+      - provider: openai-codex
+        model: gpt-6.1-terra
+```
+
+Hermes tries the entries in order when the primary has no usable credentials,
+is rate-limited or can't be reached. Without one, the note under the composer
+says the model's provider is not available. A task left on `auto` (the
+default) already follows your main model and its fallbacks.
+
 Measured on 16 conversations in English and Spanish (6 where a next step fits,
 8 where the agent asked you something, 2 where the right answer is silence; 4
 of them real exchanges scored against the reply actually sent), each run two

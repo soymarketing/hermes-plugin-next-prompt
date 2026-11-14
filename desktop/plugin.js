@@ -33,7 +33,7 @@ let reportedError = false
 const FAST_POLL_MS = 2000
 const SLOW_POLL_MS = 20000
 const FAST_WINDOW_MS = 45000
-const FAILURE_KINDS = new Set(['auth', 'rate_limit', 'timeout', 'other'])
+const FAILURE_KINDS = new Set(['auth', 'unavailable', 'rate_limit', 'timeout', 'other'])
 // Unused by the app, its editors and the OS menus; a primary-modifier chord
 // also fires while typing in the composer. Rebindable in Settings → Keybinds;
 // the palette row shows the live binding.
@@ -290,6 +290,9 @@ export default {
           auth: 'Next Prompt: the model rejected its credentials',
           authHint:
             'Check the provider login (hermes auth list), or fully quit and reopen Hermes Desktop. You can also point auxiliary.next_prompt at another provider in config.yaml.',
+          unavailable: "Next Prompt: its model's provider is not available",
+          unavailableHint:
+            'Usually a subscription limit or a missing login. Add a backup under auxiliary.next_prompt.fallback_chain in config.yaml (see the plugin README).',
           rate_limit: 'Next Prompt: the provider is rate-limiting requests',
           rate_limitHint: 'It tries again after your next message.',
           timeout: 'Next Prompt: the model took too long',
@@ -310,6 +313,9 @@ export default {
           auth: 'Next Prompt: el modelo rechazó sus credenciales',
           authHint:
             'Revisa el login del proveedor (hermes auth list) o cierra Hermes Desktop por completo, también desde la bandeja, y vuelve a abrirlo. También puedes apuntar auxiliary.next_prompt a otro proveedor en config.yaml.',
+          unavailable: 'Next Prompt: el proveedor de su modelo no está disponible',
+          unavailableHint:
+            'Suele ser un límite de la suscripción o un login que falta. Agrega un respaldo en auxiliary.next_prompt.fallback_chain en config.yaml (ver el README del plugin).',
           rate_limit: 'Next Prompt: el proveedor está limitando las peticiones',
           rate_limitHint: 'Lo intentará de nuevo tras tu próximo mensaje.',
           timeout: 'Next Prompt: el modelo tardó demasiado',

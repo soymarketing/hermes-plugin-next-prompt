@@ -1,5 +1,5 @@
 name: next-prompt
-version: 0.3.2
+version: 0.3.3
 manifest_version: 2
 api_version: 1
 description: AI-generated follow-up prompt suggestions under the Desktop composer after each turn.

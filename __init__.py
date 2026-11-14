@@ -98,6 +98,11 @@ def _classify_error(exc: BaseException) -> str:
     """Coarse failure kind for the UI. Never exposes the error text itself."""
     status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
     name = type(exc).__name__.lower()
+    # Hermes raises AuxiliaryClientUnavailable when the task's provider has no
+    # usable credentials (e.g. a subscription pool exhausted) and no
+    # auxiliary.next_prompt.fallback_chain entry could take over.
+    if "auxiliaryclientunavailable" in name:
+        return "unavailable"
     if status in (401, 403) or "authentication" in name or "permissiondenied" in name:
         return "auth"
     if status == 429 or "ratelimit" in name:

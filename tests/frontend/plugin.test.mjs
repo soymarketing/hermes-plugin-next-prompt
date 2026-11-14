@@ -205,7 +205,7 @@ test('× dismisses without using the text', () => {
 })
 
 test('a failed generation shows a muted note that names the cause', () => {
-  for (const kind of ['auth', 'rate_limit', 'timeout', 'other']) {
+  for (const kind of ['auth', 'unavailable', 'rate_limit', 'timeout', 'other']) {
     view('A')
     serve('A', null, failure('A', kind))
     assert.equal(pill(), null, 'no pill for a failure')

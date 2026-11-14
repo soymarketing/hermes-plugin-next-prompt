@@ -376,10 +376,15 @@ class ReadTimeout(Exception):
     pass
 
 
+class AuxiliaryClientUnavailable(RuntimeError):
+    """Same name as Hermes' agent.auxiliary_unavailable error."""
+
+
 class FailureTests(PluginTestCase):
     def test_failure_kinds(self):
         cases = [
             (AuthError("revoked"), "auth"),
+            (AuxiliaryClientUnavailable("No Anthropic credentials found"), "unavailable"),
             (RateLimitError("slow down"), "rate_limit"),
             (ReadTimeout("late"), "timeout"),
             (RuntimeError("boom"), "other"),
