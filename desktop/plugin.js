@@ -133,6 +133,21 @@ function dismissVisibleSuggestion() {
   if (entry) finish(entry)
 }
 
+async function generateVisibleSuggestion() {
+  const focused = host.state.focusedStoredSessionId.get()
+  if (!focused || !pluginCtx || host.state.busy.get()) return
+  $handled.set(null)
+  idleSinceMs = Date.now()
+  try {
+    const res = await pluginCtx.rest(`/generate?session_id=${encodeURIComponent(focused)}`, { method: 'POST' })
+    if (!res || !res.started) {
+      host.notify({ kind: 'info', message: pluginCtx.i18n.t('nothingToGenerate') })
+    }
+  } catch (error) {
+    host.notifyError(error, pluginCtx.i18n.t('generateFailed'))
+  }
+}
+
 // ── UI ───────────────────────────────────────────────────────────────────
 
 const rowClass = 'flex min-w-0 items-center justify-start'
@@ -283,7 +298,10 @@ export default {
         dismiss: 'Dismiss suggestion',
         useLabel: 'Next Prompt: use suggestion',
         dismissLabel: 'Next Prompt: dismiss suggestion',
+        generateLabel: 'Next Prompt: generate suggestion',
         nothingToUse: 'No follow-up suggestion in this chat right now',
+        nothingToGenerate: 'No recent turn available to generate a suggestion',
+        generateFailed: 'Could not generate a suggestion',
         copied: 'Suggestion copied — paste it into the composer',
         copyFailed: 'Could not copy the suggestion',
         failure: {
@@ -303,7 +321,10 @@ export default {
         dismiss: 'Descartar sugerencia',
         useLabel: 'Next Prompt: usar sugerencia',
         dismissLabel: 'Next Prompt: descartar sugerencia',
+        generateLabel: 'Next Prompt: generar sugerencia',
         nothingToUse: 'No hay sugerencia de seguimiento en este chat ahora',
+        nothingToGenerate: 'No hay un turno reciente para generar una sugerencia',
+        generateFailed: 'No se pudo generar una sugerencia',
         copied: 'Sugerencia copiada — pégala en el compositor',
         copyFailed: 'No se pudo copiar la sugerencia',
         failure: {
@@ -360,6 +381,16 @@ export default {
           label: t('dismissLabel'),
           keywords: ['next prompt', 'suggestion', 'dismiss', 'descartar'],
           run: dismissVisibleSuggestion
+        }
+      },
+      {
+        id: 'generate-command',
+        area: PALETTE_AREA,
+        data: {
+          id: 'next-prompt.generate',
+          label: t('generateLabel'),
+          keywords: ['next prompt', 'suggestion', 'generate', 'regenerate', 'generar'],
+          run: generateVisibleSuggestion
         }
       }
     ])

@@ -51,3 +51,22 @@ def dismiss_suggestion(session_id: str = Query("")):
     if session_id:
         _store().clear(session_id)
     return {"ok": True}
+
+
+def _plugin_modules():
+    store_mod = _store()
+    return [
+        mod
+        for mod in reversed(list(sys.modules.values()))
+        if mod is not None and getattr(mod, "store", None) is store_mod and callable(getattr(mod, "regenerate", None))
+    ]
+
+
+@router.post("/generate")
+def generate_suggestion(session_id: str = Query("")):
+    if not session_id:
+        return {"ok": False, "started": False}
+    for mod in _plugin_modules():
+        if mod.regenerate(session_id):
+            return {"ok": True, "started": True}
+    return {"ok": False, "started": False}

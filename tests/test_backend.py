@@ -229,6 +229,17 @@ class GenerationTests(PluginTestCase):
             conn.execute("UPDATE pending SET timestamp = ? WHERE session_id = 'old'", (time.time() - 8 * 24 * 3600,))
         self.assertFalse(self.has("old"))
 
+    def test_non_interactive_turns_do_not_clear_or_generate(self):
+        llm = FakeLLM(text="Should not run")
+        module, ctx = self.start(llm)
+        self.store.put_suggestion("s-ui", "Keep me")
+        ctx.hooks["pre_llm_call"](session_id="s-ui", platform="telegram")
+        ctx.hooks["pre_llm_call"](session_id="s-ui", origin="background_review")
+        self.turn_done(ctx, "s-ui", origin="background_review")
+        time.sleep(0.2)
+        self.assertEqual(self.suggestion("s-ui")["text"], "Keep me")
+        self.assertEqual(llm.calls, [])
+
 
 class LegacyStoreTests(PluginTestCase):
     """0.3.0 kept pending suggestions in ``ctx.state.data_dir/suggestions.json``."""
@@ -347,10 +358,13 @@ class ContextAndCleanTests(unittest.TestCase):
             "None": "",
             "": "",
             "ok": "",
-            "x" * 200: "",
+            "x" * 240: "",
+            "x" * 200: "x" * 200,
             # A reply to the agent's question survives untouched...
             "Sí, despliégalo a producción": "Sí, despliégalo a producción",
             "Reinicié y el botón ya funciona": "Reinicié y el botón ya funciona",
+            # Inline code brackets/generics are technical syntax, not fill-ins.
+            "Fix `arr[0]` and `List<str>` in parser.py": "Fix `arr[0]` and `List<str>` in parser.py",
             # ...but anything the user must edit before sending is dropped.
             "Envíala a [correo del cliente]": "",
             "Probé la pill: [funcionó / no salió / salió pero con error]": "",
@@ -360,6 +374,14 @@ class ContextAndCleanTests(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw[:40]):
                 self.assertEqual(self.m._clean(raw), expected)
+
+    def test_clean_with_reason_reports_drop_causes(self):
+        self.assertEqual(self.m._clean_with_reason(""), ("", "empty"))
+        self.assertEqual(self.m._clean_with_reason("NULL"), ("", "null_answer"))
+        self.assertEqual(self.m._clean_with_reason("Send to <email>"), ("", "fill_in_placeholder"))
+        self.assertEqual(self.m._clean_with_reason("ok"), ("", "too_short"))
+        self.assertEqual(self.m._clean_with_reason("x" * 240), ("", "too_long"))
+        self.assertEqual(self.m._clean_with_reason("Run pytest"), ("Run pytest", ""))
 
 
 class AuthError(Exception):
@@ -496,6 +518,20 @@ class RestApiTests(PluginTestCase):
         self.assertEqual(self.get("s-cross")["suggestion"]["text"], "Desde otro proceso")
         self.client.post("/api/plugins/next-prompt/dismiss", params={"session_id": "s-cross"})
         self.assertFalse(self.has("s-cross"))
+
+    def test_generate_endpoint_regenerates_from_cached_turn(self):
+        llm = FakeLLM(text="First suggestion")
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s-gen")
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-gen") or {}).get("text") == "First suggestion"))
+        self.client.post("/api/plugins/next-prompt/dismiss", params={"session_id": "s-gen"})
+        self.assertFalse(self.has("s-gen"))
+
+        llm.text = "Regenerated suggestion"
+        res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-gen"})
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json()["started"])
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-gen") or {}).get("text") == "Regenerated suggestion"))
 
 
 if __name__ == "__main__":
