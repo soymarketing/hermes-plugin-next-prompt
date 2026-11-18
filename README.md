@@ -50,6 +50,10 @@ or *dismiss suggestion*:
   hold the modifier. If the host cannot submit, it falls back to filling the
   composer.
 - **Click ×** to dismiss it. Sending your own message clears it too.
+- **No pill, or not the one you wanted?** Ctrl/⌘+K → *Next Prompt: generate
+  suggestion* asks for a new one from the chat's last turn, without sending a
+  message. It also works for chats from before a restart (the last turn of
+  the 50 most recent chats is kept for 7 days).
 - **It stays until you act on it.** Switching chats or screens, or restarting
   the backend, does not lose it. Stale suggestions expire after 7 days.
 - **When a suggestion can't be generated**, a muted note takes the pill's

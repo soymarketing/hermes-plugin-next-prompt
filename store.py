@@ -8,8 +8,9 @@ its hooks) run in the gateway. Memory is not shared between them, so this
 SQLite file in the plugin's data directory is the only state both halves
 read and write. WAL lets one process read while the other writes.
 
-One row per session: the pending suggestion, or the reason the last one
-could not be generated. Both halves load this file by path (the host imports
+One row per session in ``pending``: the pending suggestion, or the reason the
+last one could not be generated. ``turns`` keeps each session's last trimmed
+context, so "generate suggestion" also works after a restart. Both halves load this file by path (the host imports
 ``plugin_api.py`` with no package), so it holds no state of its own.
 """
 
@@ -46,6 +47,10 @@ SUGGESTION_TTL_SECONDS = 7 * 24 * 3600
 # fix) an old one would just be noise.
 FAILURE_TTL_SECONDS = 6 * 3600
 MAX_ROWS = 200
+# Last turn per session for manual regeneration: the trimmed context the
+# prompt uses (not the transcript), the most recent sessions only.
+TURN_TTL_SECONDS = SUGGESTION_TTL_SECONDS
+MAX_TURNS = 50
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending (
@@ -53,6 +58,15 @@ CREATE TABLE IF NOT EXISTS pending (
     kind       TEXT NOT NULL,
     text       TEXT,
     failure    TEXT,
+    timestamp  REAL NOT NULL
+)
+"""
+
+_TURNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS turns (
+    session_id TEXT PRIMARY KEY,
+    context    TEXT NOT NULL,
+    last_user  TEXT,
     timestamp  REAL NOT NULL
 )
 """
@@ -95,6 +109,7 @@ def _connect() -> Optional[sqlite3.Connection]:
             conn = sqlite3.connect(str(directory / DB_FILE), timeout=5.0, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_SCHEMA)
+        conn.execute(_TURNS_SCHEMA)
         return conn
     except Exception as exc:
         logger.warning("next-prompt: could not open %s: %s", DB_FILE, exc)
@@ -222,3 +237,49 @@ def import_legacy(entries: Dict[str, Any]) -> int:
     except sqlite3.Error as exc:
         logger.warning("next-prompt: could not import saved suggestions: %s", exc)
         return 0
+
+
+def put_turn(session_id: str, context: str, last_user: str) -> bool:
+    """Remember the session's last trimmed context for "generate suggestion"."""
+    if not session_id or not (context or "").strip():
+        return False
+    conn = _connect()
+    if conn is None:
+        return False
+    now = time.time()
+    try:
+        with closing(conn), conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO turns (session_id, context, last_user, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, context, last_user or "", now),
+            )
+            conn.execute("DELETE FROM turns WHERE timestamp < ?", (now - TURN_TTL_SECONDS,))
+            conn.execute(
+                "DELETE FROM turns WHERE session_id NOT IN "
+                "(SELECT session_id FROM turns ORDER BY timestamp DESC LIMIT ?)",
+                (MAX_TURNS,),
+            )
+    except sqlite3.Error as exc:
+        logger.warning("next-prompt: could not save the last turn of %s: %s", session_id, exc)
+        return False
+    return True
+
+
+def get_turn(session_id: str) -> Optional[tuple]:
+    """``(context, last_user)`` of the session's last turn, or None."""
+    if not session_id:
+        return None
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        with closing(conn):
+            row = conn.execute(
+                "SELECT context, last_user, timestamp FROM turns WHERE session_id = ?", (session_id,)
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning("next-prompt: could not read the last turn of %s: %s", session_id, exc)
+        return None
+    if not row or not row[0] or time.time() - float(row[2] or 0) >= TURN_TTL_SECONDS:
+        return None
+    return row[0], row[1] or ""

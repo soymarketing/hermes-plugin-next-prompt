@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5
+
+- **"Next Prompt: generate suggestion" now works on a standard install.** In
+  0.3.4 it went through the dashboard API, which by default runs in the
+  plugin host, a different process from the agent's hooks, so it always
+  answered "unavailable". It now goes over the gateway's plugin RPC
+  (`plugin.next-prompt.generate`), which runs next to the hooks; the REST
+  route stays as the fallback on hosts without plugin RPC.
+- **It also works for chats from before a restart.** The last turn's trimmed
+  context (not the transcript) of the 50 most recent chats is kept for 7 days
+  in the plugin's SQLite store, so you no longer need to send a message first.
+
 ## 0.3.4
 
 - **Background turns no longer wipe the pill.** Turns Hermes injects on its

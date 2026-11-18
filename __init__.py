@@ -359,16 +359,20 @@ def _cache_turn(session_id: str, context: str, last_user: str) -> None:
 
 
 def regenerate(session_id: str) -> bool:
-    """Manually trigger suggestion generation using the last cached turn."""
+    """Manually trigger suggestion generation from the session's last turn:
+    this process's cache, else the copy in the store (it survives restarts)."""
     settings = _get_settings()
     if not session_id or not settings["enabled"]:
         return False
     with _lock:
         cached = _last_turns.get(session_id)
+    if cached is None:
+        cached = store.get_turn(session_id)
         if cached is None:
             return False
-        _last_turns.move_to_end(session_id)
-        context, last_user = cached
+    context, last_user = cached
+    with _lock:
+        _cache_turn(session_id, context, last_user)
         seq = _turn_seq.get(session_id, 0) + 1
         _turn_seq[session_id] = seq
     _spawn(_generate_from_context, session_id, seq, context, last_user)
@@ -410,6 +414,7 @@ def _on_post_llm_call(**kwargs) -> None:
     with _lock:
         _cache_turn(session_id, context, last_user)
         seq = _turn_seq.get(session_id, 0)
+    store.put_turn(session_id, context, last_user)
     if time.time() - _last_suggestion_time.get(session_id, 0) < settings["cooldown_seconds"]:
         return
     # The worker must inherit this profile's secret/home scope, or ctx.llm

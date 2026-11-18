@@ -621,5 +621,29 @@ class RestApiTests(PluginTestCase):
         self.assertEqual(set(ctx.hooks), {"pre_llm_call", "post_llm_call"})
 
 
+    def test_generate_rpc_survives_a_restart(self):
+        # The last turn is kept in the store, so a chat from before a gateway
+        # restart can still ask for a suggestion without a new message.
+        llm = FakeLLM(text="Before restart")
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s-old")
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-old") or {}).get("text") == "Before restart"))
+        self.assertIsNotNone(self.store.get_turn("s-old"))
+
+        llm2 = FakeLLM(text="After restart")
+        module2, ctx2 = self.start(llm2)   # a fresh module: empty in-memory cache
+        self.assertEqual(module2._last_turns, {})
+        res = ctx2.rpc["generate"]({"session_id": "s-old"}, session_id=None)
+        self.assertEqual(res, {"ok": True, "started": True})
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-old") or {}).get("text") == "After restart"))
+
+    def test_turn_store_is_bounded(self):
+        for i in range(self.store.MAX_TURNS + 5):
+            self.assertTrue(self.store.put_turn(f"s{i}", f"ctx {i}", "u"))
+        self.assertIsNone(self.store.get_turn("s0"))
+        self.assertEqual(self.store.get_turn(f"s{self.store.MAX_TURNS + 4}"), (f"ctx {self.store.MAX_TURNS + 4}", "u"))
+        self.assertFalse(self.store.put_turn("s-empty", "   ", "u"))
+
+
 if __name__ == "__main__":
     unittest.main()
