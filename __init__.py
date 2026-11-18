@@ -56,9 +56,12 @@ _lock = threading.Lock()
 _llm_task = None
 _ctx = None
 _SYNTHETIC_USER_PREFIXES = (
-    "[IMPORTANT: Background process ",
-    "[System: ",
-    "[Your active task list was preserved across context compression]",
+    "[important: background process ",
+    "[background process ",
+    "[system: ",
+    "[async delegation complete",
+    "[async batch complete",
+    "[your active task list was preserved across context compression]",
 )
 
 
@@ -266,7 +269,10 @@ def _clean_with_reason(text: str) -> tuple[str, str]:
         if lowered.startswith(label):
             text = text[len(label):].strip()
             break
-    if _FILL_IN.search(_INLINE_CODE.sub("", text)):
+    candidate = text
+    if len(candidate) >= 2 and _QUOTE_PAIRS.get(candidate[0]) == candidate[-1]:
+        candidate = candidate[1:-1].strip()
+    if _FILL_IN.search(_INLINE_CODE.sub("", candidate)):
         return "", "fill_in_placeholder"  # a blank to fill in or options to delete saves no typing
     text = text.strip("*_ ").strip()
     if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
@@ -363,7 +369,7 @@ def _is_interactive_turn(kwargs: dict) -> bool:
     if (kwargs.get("platform") or "") not in _UI_PLATFORMS:
         return False
     user_msg = kwargs.get("user_message")
-    if isinstance(user_msg, str) and user_msg.lstrip().startswith(_SYNTHETIC_USER_PREFIXES):
+    if isinstance(user_msg, str) and user_msg.lstrip().lower().startswith(_SYNTHETIC_USER_PREFIXES):
         return False
     return True
 

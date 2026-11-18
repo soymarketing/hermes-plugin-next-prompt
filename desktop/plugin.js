@@ -136,14 +136,15 @@ function dismissVisibleSuggestion() {
 async function generateVisibleSuggestion() {
   const focused = host.state.focusedStoredSessionId.get()
   if (!focused || !pluginCtx || host.state.busy.get()) return
-  $handled.set(null)
-  idleSinceMs = Date.now()
   try {
     const res = await pluginCtx.rest(`/generate?session_id=${encodeURIComponent(focused)}`, { method: 'POST' })
-    if (!res || !res.started) {
-      const key = res && res.reason === 'unavailable' ? 'generateUnavailable' : 'nothingToGenerate'
-      host.notify({ kind: 'info', message: pluginCtx.i18n.t(key) })
+    if (res && res.started) {
+      $handled.set(null)
+      idleSinceMs = Date.now()
+      return
     }
+    const key = res && res.reason === 'unavailable' ? 'generateUnavailable' : 'nothingToGenerate'
+    host.notify({ kind: 'info', message: pluginCtx.i18n.t(key) })
   } catch (error) {
     host.notifyError(error, pluginCtx.i18n.t('generateFailed'))
   }

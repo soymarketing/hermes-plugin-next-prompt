@@ -114,6 +114,7 @@ class PluginTestCase(unittest.TestCase):
         for thread in threading.enumerate():
             if thread.name.startswith("next-prompt") and thread is not threading.current_thread():
                 thread.join(timeout=5)
+        self.store.set_regenerator(None)
         for module in self.modules:
             sys.modules.pop(module.__name__, None)
 
@@ -242,7 +243,12 @@ class GenerationTests(PluginTestCase):
         ctx.hooks["pre_llm_call"](
             session_id="s-ui",
             platform="desktop",
-            user_message="[System: Your previous tool call was truncated]",
+            user_message="[SYSTEM: Background process matched]",
+        )
+        ctx.hooks["pre_llm_call"](
+            session_id="s-ui",
+            platform="desktop",
+            user_message="[Background process proc_1 heartbeat #1 — still running]",
         )
         self.turn_done(
             ctx,
@@ -388,6 +394,8 @@ class ContextAndCleanTests(unittest.TestCase):
             "Reinicié y el botón ya funciona": "Reinicié y el botón ya funciona",
             # Inline code brackets/generics are technical syntax, not fill-ins.
             "Fix `arr[0]` and `List<str>` in parser.py": "Fix `arr[0]` and `List<str>` in parser.py",
+            # A whole suggestion wrapped in backticks still cannot sneak placeholders past _FILL_IN.
+            "`Send to <email>`": "",
             # ...but anything the user must edit before sending is dropped.
             "Envíala a [correo del cliente]": "",
             "Probé la pill: [funcionó / no salió / salió pero con error]": "",
