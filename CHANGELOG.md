@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.4
+
+- **Background turns no longer wipe the pill.** Turns Hermes injects on its
+  own (a background process that matched a watch pattern or finished, a
+  `[System: …]` note) neither clear nor replace the pending suggestion. A
+  real message from any platform, Telegram included, still clears it.
+- **"Next Prompt: generate suggestion" in the Command Palette.** Asks for a
+  new suggestion from the chat's last turn when none showed up or it didn't
+  fit. Where the plugin API runs in a different process from the agent's
+  hooks (a secondary profile in a multi-profile gateway), it says
+  regeneration is unavailable there.
+- **Fewer valid suggestions dropped.** Up to 220 characters (was 160), and
+  code in backticks such as `arr[0]` or `List<str>` is no longer mistaken
+  for a blank to fill in. Placeholders are still filtered, backticks or not.
+- **Each dropped suggestion is logged with its reason** (`empty`,
+  `null_answer`, `fill_in_placeholder`, `too_short`, `too_long`).
+
+Thanks to @madiajijah11 (#4, #5).
+
 ## 0.3.3
 
 - **A clear note when the model's provider is unavailable.** When the
