@@ -233,12 +233,35 @@ class GenerationTests(PluginTestCase):
         llm = FakeLLM(text="Should not run")
         module, ctx = self.start(llm)
         self.store.put_suggestion("s-ui", "Keep me")
-        ctx.hooks["pre_llm_call"](session_id="s-ui", platform="telegram")
-        ctx.hooks["pre_llm_call"](session_id="s-ui", origin="background_review")
-        self.turn_done(ctx, "s-ui", origin="background_review")
+        ctx.hooks["pre_llm_call"](session_id="s-ui", platform="telegram", user_message="hi")
+        ctx.hooks["pre_llm_call"](
+            session_id="s-ui",
+            platform="desktop",
+            user_message="[IMPORTANT: Background process watcher finished.]",
+        )
+        ctx.hooks["pre_llm_call"](
+            session_id="s-ui",
+            platform="desktop",
+            user_message="[System: Your previous tool call was truncated]",
+        )
+        self.turn_done(
+            ctx,
+            "s-ui",
+            platform="desktop",
+            user_message="[IMPORTANT: Background process watcher finished.]",
+        )
         time.sleep(0.2)
         self.assertEqual(self.suggestion("s-ui")["text"], "Keep me")
         self.assertEqual(llm.calls, [])
+
+    def test_turn_cache_is_bounded_lru(self):
+        module, ctx = self.start(FakeLLM(text="ok"))
+        limit = module._MAX_CACHED_TURNS
+        for i in range(limit + 5):
+            module._cache_turn(f"s-{i}", f"[User]: msg {i}", f"msg {i}")
+        self.assertEqual(len(module._last_turns), limit)
+        self.assertNotIn("s-0", module._last_turns)
+        self.assertIn(f"s-{limit + 4}", module._last_turns)
 
 
 class LegacyStoreTests(PluginTestCase):
@@ -532,6 +555,12 @@ class RestApiTests(PluginTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json()["started"])
         self.assertTrue(wait_for(lambda: (self.suggestion("s-gen") or {}).get("text") == "Regenerated suggestion"))
+
+    def test_generate_endpoint_reports_unavailable_without_in_process_hook(self):
+        self.store.set_regenerator(None)
+        res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-missing"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"ok": False, "started": False, "reason": "unavailable"})
 
 
 if __name__ == "__main__":

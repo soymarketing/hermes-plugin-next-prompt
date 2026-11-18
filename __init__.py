@@ -9,6 +9,7 @@ plugin-data dir: the desktop half reads them through
 survive screen switches and backend restarts.
 """
 
+from collections import OrderedDict
 import contextvars
 import hashlib
 import importlib.util
@@ -49,11 +50,16 @@ store = _load_store()
 # Per process is enough: a session's pre and post hooks run in the same one.
 _turn_seq: Dict[str, int] = {}
 _last_suggestion_time: Dict[str, float] = {}
-_last_turns: Dict[str, tuple[list, dict]] = {}
+_MAX_CACHED_TURNS = 50
+_last_turns: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
 _lock = threading.Lock()
 _llm_task = None
 _ctx = None
-_NON_INTERACTIVE_ORIGINS = frozenset({"background_review", "cron", "subagent"})
+_SYNTHETIC_USER_PREFIXES = (
+    "[IMPORTANT: Background process ",
+    "[System: ",
+    "[Your active task list was preserved across context compression]",
+)
 
 
 def _get_settings() -> Dict[str, Any]:
@@ -281,8 +287,7 @@ def _clean(text: str) -> str:
     return cleaned
 
 
-def _generate_suggestion(session_id: str, seq: int, messages: list, settings: dict) -> None:
-    context = _build_context(messages, settings["max_context_messages"])
+def _generate_from_context(session_id: str, seq: int, context: str, last_user: str) -> None:
     if not context.strip():
         return
     try:
@@ -291,7 +296,7 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             return
         kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
-            messages=_prompt_messages(context, _last_user_text(messages)),
+            messages=_prompt_messages(context, last_user),
             max_tokens=100,
             temperature=0.3,
             purpose="next-prompt suggestion",
@@ -321,6 +326,20 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
     logger.info("next-prompt: stored suggestion for session %s", session_id)
 
 
+def _generate_suggestion(session_id: str, seq: int, messages: list, settings: dict) -> None:
+    context = _build_context(messages, settings["max_context_messages"])
+    _generate_from_context(session_id, seq, context, _last_user_text(messages))
+
+
+def _cache_turn(session_id: str, context: str, last_user: str) -> None:
+    if not context.strip():
+        return
+    _last_turns[session_id] = (context, last_user)
+    _last_turns.move_to_end(session_id)
+    while len(_last_turns) > _MAX_CACHED_TURNS:
+        _last_turns.popitem(last=False)
+
+
 def regenerate(session_id: str) -> bool:
     """Manually trigger suggestion generation using the last cached turn."""
     settings = _get_settings()
@@ -330,10 +349,11 @@ def regenerate(session_id: str) -> bool:
         cached = _last_turns.get(session_id)
         if cached is None:
             return False
-        messages, cached_settings = cached
+        _last_turns.move_to_end(session_id)
+        context, last_user = cached
         seq = _turn_seq.get(session_id, 0) + 1
         _turn_seq[session_id] = seq
-    _spawn(_generate_suggestion, session_id, seq, list(messages), cached_settings)
+    _spawn(_generate_from_context, session_id, seq, context, last_user)
     return True
 
 
@@ -342,7 +362,8 @@ def regenerate(session_id: str) -> bool:
 def _is_interactive_turn(kwargs: dict) -> bool:
     if (kwargs.get("platform") or "") not in _UI_PLATFORMS:
         return False
-    if (kwargs.get("origin") or "") in _NON_INTERACTIVE_ORIGINS:
+    user_msg = kwargs.get("user_message")
+    if isinstance(user_msg, str) and user_msg.lstrip().startswith(_SYNTHETIC_USER_PREFIXES):
         return False
     return True
 
@@ -366,18 +387,20 @@ def _on_post_llm_call(**kwargs) -> None:
     messages = kwargs.get("conversation_history") or []
     if not session_id or len(messages) < 2:
         return
-    # Only surfaces that render the pill; messaging/background turns would
+    # Only surfaces that render the pill; messaging/synthetic turns would
     # spend an LLM call on a suggestion nobody can see.
     if not _is_interactive_turn(kwargs):
         return
+    context = _build_context(messages, settings["max_context_messages"])
+    last_user = _last_user_text(messages)
     with _lock:
-        _last_turns[session_id] = (list(messages), settings)
+        _cache_turn(session_id, context, last_user)
         seq = _turn_seq.get(session_id, 0)
     if time.time() - _last_suggestion_time.get(session_id, 0) < settings["cooldown_seconds"]:
         return
     # The worker must inherit this profile's secret/home scope, or ctx.llm
     # fails with UnscopedSecretError.
-    _spawn(_generate_suggestion, session_id, seq, list(messages), settings)
+    _spawn(_generate_from_context, session_id, seq, context, last_user)
 
 
 def _spawn(target, *args) -> None:
@@ -409,4 +432,5 @@ def register(ctx):
         _llm_task = None  # older host: plain main-model call
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    store.set_regenerator(regenerate)
     logger.info("next-prompt: registered (%d saved suggestion(s) in %s)", store.count(), store.DB_FILE)

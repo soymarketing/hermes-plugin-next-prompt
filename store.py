@@ -20,9 +20,24 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+_regenerator: Optional[Callable[[str], bool]] = None
+
+
+def set_regenerator(fn: Optional[Callable[[str], bool]]) -> None:
+    """Register the in-process hook callback for manual regeneration."""
+    global _regenerator
+    _regenerator = fn
+
+
+def regenerate(session_id: str) -> Optional[bool]:
+    """Trigger regeneration if the hook half lives in this process, else None."""
+    if _regenerator is None or not session_id:
+        return None
+    return bool(_regenerator(session_id))
 
 PLUGIN_NAME = "next-prompt"
 DB_FILE = "suggestions.db"

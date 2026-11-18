@@ -141,7 +141,8 @@ async function generateVisibleSuggestion() {
   try {
     const res = await pluginCtx.rest(`/generate?session_id=${encodeURIComponent(focused)}`, { method: 'POST' })
     if (!res || !res.started) {
-      host.notify({ kind: 'info', message: pluginCtx.i18n.t('nothingToGenerate') })
+      const key = res && res.reason === 'unavailable' ? 'generateUnavailable' : 'nothingToGenerate'
+      host.notify({ kind: 'info', message: pluginCtx.i18n.t(key) })
     }
   } catch (error) {
     host.notifyError(error, pluginCtx.i18n.t('generateFailed'))
@@ -301,6 +302,7 @@ export default {
         generateLabel: 'Next Prompt: generate suggestion',
         nothingToUse: 'No follow-up suggestion in this chat right now',
         nothingToGenerate: 'No recent turn available to generate a suggestion',
+        generateUnavailable: 'Regeneration is unavailable when the plugin API runs in a separate process',
         generateFailed: 'Could not generate a suggestion',
         copied: 'Suggestion copied — paste it into the composer',
         copyFailed: 'Could not copy the suggestion',
@@ -324,6 +326,7 @@ export default {
         generateLabel: 'Next Prompt: generar sugerencia',
         nothingToUse: 'No hay sugerencia de seguimiento en este chat ahora',
         nothingToGenerate: 'No hay un turno reciente para generar una sugerencia',
+        generateUnavailable: 'La regeneración no está disponible cuando la API del plugin corre en otro proceso',
         generateFailed: 'No se pudo generar una sugerencia',
         copied: 'Sugerencia copiada — pégala en el compositor',
         copyFailed: 'No se pudo copiar la sugerencia',
