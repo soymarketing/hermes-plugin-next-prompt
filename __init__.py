@@ -211,9 +211,12 @@ _NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
 _LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
 # "[result]", "[works / fails]", "<email>", "___": the user would have to edit
-# it before sending, which is as much work as typing it. Inline code spans are
-# stripped first so technical syntax like `arr[0]` or `List<str>` is kept.
+# it before sending, which is as much work as typing it. Inline code spans that
+# look like code (`arr[0]`, `List<str>`, `foo.bar()`) are stripped first so
+# technical syntax survives while backtick-wrapped placeholders (`<email>`, `[name]`)
+# are still caught.
 _INLINE_CODE = re.compile(r"`[^`]+`")
+_CODE_SPAN_HINT = re.compile(r"[.(]|::|->|[A-Za-z0-9](?:\[|<)")
 _FILL_IN = re.compile(r"\[[^\]]*\]|<[^<>]+>|_{3,}")
 
 
@@ -259,6 +262,10 @@ def _build_context(messages: list, max_messages: int) -> str:
     return "\n\n".join(parts)
 
 
+def _strip_code_spans(text: str) -> str:
+    return _INLINE_CODE.sub(lambda m: "" if _CODE_SPAN_HINT.search(m.group(0)[1:-1]) else m.group(0), text)
+
+
 def _clean_with_reason(text: str) -> tuple[str, str]:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     if not lines:
@@ -272,7 +279,7 @@ def _clean_with_reason(text: str) -> tuple[str, str]:
     candidate = text
     if len(candidate) >= 2 and _QUOTE_PAIRS.get(candidate[0]) == candidate[-1]:
         candidate = candidate[1:-1].strip()
-    if _FILL_IN.search(_INLINE_CODE.sub("", candidate)):
+    if _FILL_IN.search(_strip_code_spans(candidate)):
         return "", "fill_in_placeholder"  # a blank to fill in or options to delete saves no typing
     text = text.strip("*_ ").strip()
     if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
@@ -365,19 +372,15 @@ def regenerate(session_id: str) -> bool:
 
 # ── hooks ────────────────────────────────────────────────────────────────
 
-def _is_interactive_turn(kwargs: dict) -> bool:
-    if (kwargs.get("platform") or "") not in _UI_PLATFORMS:
-        return False
+def _is_synthetic_turn(kwargs: dict) -> bool:
     user_msg = kwargs.get("user_message")
-    if isinstance(user_msg, str) and user_msg.lstrip().lower().startswith(_SYNTHETIC_USER_PREFIXES):
-        return False
-    return True
+    return isinstance(user_msg, str) and user_msg.lstrip().lower().startswith(_SYNTHETIC_USER_PREFIXES)
 
 
 def _on_pre_llm_call(**kwargs) -> None:
     """The user sent their own next message: any pending suggestion is moot."""
     session_id = kwargs.get("session_id") or ""
-    if not session_id or not _is_interactive_turn(kwargs):
+    if not session_id or _is_synthetic_turn(kwargs):
         return
     with _lock:
         _turn_seq[session_id] = _turn_seq.get(session_id, 0) + 1
@@ -395,7 +398,7 @@ def _on_post_llm_call(**kwargs) -> None:
         return
     # Only surfaces that render the pill; messaging/synthetic turns would
     # spend an LLM call on a suggestion nobody can see.
-    if not _is_interactive_turn(kwargs):
+    if _is_synthetic_turn(kwargs) or (kwargs.get("platform") or "") not in _UI_PLATFORMS:
         return
     context = _build_context(messages, settings["max_context_messages"])
     last_user = _last_user_text(messages)

@@ -230,11 +230,10 @@ class GenerationTests(PluginTestCase):
             conn.execute("UPDATE pending SET timestamp = ? WHERE session_id = 'old'", (time.time() - 8 * 24 * 3600,))
         self.assertFalse(self.has("old"))
 
-    def test_non_interactive_turns_do_not_clear_or_generate(self):
+    def test_synthetic_turns_do_not_clear_or_generate(self):
         llm = FakeLLM(text="Should not run")
         module, ctx = self.start(llm)
         self.store.put_suggestion("s-ui", "Keep me")
-        ctx.hooks["pre_llm_call"](session_id="s-ui", platform="telegram", user_message="hi")
         ctx.hooks["pre_llm_call"](
             session_id="s-ui",
             platform="desktop",
@@ -258,6 +257,17 @@ class GenerationTests(PluginTestCase):
         )
         time.sleep(0.2)
         self.assertEqual(self.suggestion("s-ui")["text"], "Keep me")
+        self.assertEqual(llm.calls, [])
+
+    def test_non_ui_human_message_clears_old_suggestion_without_generating(self):
+        llm = FakeLLM(text="Should not run")
+        module, ctx = self.start(llm)
+        self.store.put_suggestion("s-shared", "Old desktop pill")
+        ctx.hooks["pre_llm_call"](session_id="s-shared", platform="telegram", user_message="hi from phone")
+        self.assertFalse(self.has("s-shared"))
+        self.turn_done(ctx, "s-shared", platform="telegram", user_message="hi from phone")
+        time.sleep(0.2)
+        self.assertFalse(self.has("s-shared"))
         self.assertEqual(llm.calls, [])
 
     def test_turn_cache_is_bounded_lru(self):
@@ -394,8 +404,10 @@ class ContextAndCleanTests(unittest.TestCase):
             "Reinicié y el botón ya funciona": "Reinicié y el botón ya funciona",
             # Inline code brackets/generics are technical syntax, not fill-ins.
             "Fix `arr[0]` and `List<str>` in parser.py": "Fix `arr[0]` and `List<str>` in parser.py",
-            # A whole suggestion wrapped in backticks still cannot sneak placeholders past _FILL_IN.
+            # Backtick-wrapped placeholders (whole string or inline) must still be dropped.
             "`Send to <email>`": "",
+            "Send it to `<email>`": "",
+            "Pick `[option A / option B]`": "",
             # ...but anything the user must edit before sending is dropped.
             "Envíala a [correo del cliente]": "",
             "Probé la pill: [funcionó / no salió / salió pero con error]": "",
