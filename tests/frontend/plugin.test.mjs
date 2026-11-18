@@ -351,3 +351,51 @@ test('palette generate requests a new suggestion', async () => {
   await command('next-prompt.generate').run()
   assert.deepEqual(ctx.restCalls.at(-1), ['/generate?session_id=A', 'POST'])
 })
+
+test('palette generate goes over the plugin RPC when the host has it', async () => {
+  resetCalls()
+  view('A')
+  serve('A', null)
+  render()
+  const before = ctx.restCalls.length
+  const rpc = []
+  host.request = async (method, params) => { rpc.push([method, params]); return { ok: true, started: true } }
+  try {
+    await command('next-prompt.generate').run()
+  } finally {
+    delete host.request
+  }
+  assert.deepEqual(rpc, [['plugin.next-prompt.generate', { session_id: 'A' }]])
+  assert.equal(ctx.restCalls.length, before, 'no REST call when the RPC answered')
+  assert.deepEqual(calls.notify, [])
+})
+
+test('palette generate falls back to REST when the RPC is missing', async () => {
+  resetCalls()
+  view('A')
+  serve('A', null)
+  render()
+  host.request = async () => { throw Object.assign(new Error('Method not found'), { code: -32601 }) }
+  try {
+    await command('next-prompt.generate').run()
+  } finally {
+    delete host.request
+  }
+  assert.deepEqual(ctx.restCalls.at(-1), ['/generate?session_id=A', 'POST'])
+})
+
+test('palette generate reports a missing turn from the RPC without calling REST', async () => {
+  resetCalls()
+  view('A')
+  serve('A', null)
+  render()
+  const before = ctx.restCalls.length
+  host.request = async () => ({ ok: false, started: false, reason: 'no_turn' })
+  try {
+    await command('next-prompt.generate').run()
+  } finally {
+    delete host.request
+  }
+  assert.equal(ctx.restCalls.length, before)
+  assert.equal(calls.notify.at(-1)?.message, 'nothingToGenerate')
+})

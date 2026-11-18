@@ -447,4 +447,32 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     store.set_regenerator(regenerate)
+    # The palette's "generate suggestion" goes over the gateway's plugin RPC: the
+    # gateway runs this handler wherever the plugin's hooks run, so it sees the
+    # cached turn even when the dashboard API (/generate) lives in another
+    # process (plugin host isolation, multi-profile gateways).
+    register_rpc = getattr(ctx, "register_rpc", None)
+    if callable(register_rpc):
+        try:
+            register_rpc("generate", _rpc_generate)
+        except Exception:  # noqa: BLE001 — older host or rejected name: REST stays the fallback
+            logger.debug("next-prompt: plugin RPC unavailable", exc_info=True)
     logger.info("next-prompt: registered (%d saved suggestion(s) in %s)", store.count(), store.DB_FILE)
+
+
+def _rpc_generate(params=None, *, session_id=None, **kwargs):
+    """``plugin.next-prompt.generate``: regenerate from the session's last turn.
+
+    The client names the Desktop's stored session id in ``params``; the gateway
+    may also pass the session it resolved. Either one that has a cached turn wins."""
+    candidates = []
+    if isinstance(params, dict) and params.get("session_id"):
+        candidates.append(str(params["session_id"]))
+    if session_id and str(session_id) not in candidates:
+        candidates.append(str(session_id))
+    if not candidates:
+        return {"ok": False, "started": False, "reason": "no_session"}
+    for sid in candidates:
+        if regenerate(sid):
+            return {"ok": True, "started": True}
+    return {"ok": False, "started": False, "reason": "no_turn"}

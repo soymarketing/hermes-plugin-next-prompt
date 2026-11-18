@@ -133,11 +133,26 @@ function dismissVisibleSuggestion() {
   if (entry) finish(entry)
 }
 
+// The gateway's plugin RPC runs the handler where the plugin's hooks run, so it
+// reaches the cached turn even when the dashboard API is in another process.
+// Older hosts (no RPC, or the method not loaded yet) fall back to REST.
+async function requestGenerate(sessionId) {
+  if (typeof host.request === 'function') {
+    try {
+      const res = await host.request('plugin.next-prompt.generate', { session_id: sessionId })
+      if (res && typeof res === 'object') return res
+    } catch {
+      // fall through to the REST route
+    }
+  }
+  return pluginCtx.rest(`/generate?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' })
+}
+
 async function generateVisibleSuggestion() {
   const focused = host.state.focusedStoredSessionId.get()
   if (!focused || !pluginCtx || host.state.busy.get()) return
   try {
-    const res = await pluginCtx.rest(`/generate?session_id=${encodeURIComponent(focused)}`, { method: 'POST' })
+    const res = await requestGenerate(focused)
     if (res && res.started) {
       $handled.set(null)
       idleSinceMs = Date.now()

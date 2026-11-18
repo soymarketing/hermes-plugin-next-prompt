@@ -64,6 +64,7 @@ class FakeCtx:
 
     def __init__(self, data_dir, llm, settings=None, aux_tasks=True):
         self.hooks: dict = {}
+        self.rpc: dict = {}
         self.llm = llm
         self.settings = settings or {}
         self.state = types.SimpleNamespace(data_dir=data_dir)
@@ -73,6 +74,9 @@ class FakeCtx:
 
     def register_hook(self, name, fn):
         self.hooks[name] = fn
+
+    def register_rpc(self, name, fn):
+        self.rpc[name] = fn
 
 
 def wait_for(predicate, timeout=5.0):
@@ -586,6 +590,35 @@ class RestApiTests(PluginTestCase):
         res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-missing"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), {"ok": False, "started": False, "reason": "unavailable"})
+
+
+    def test_generate_rpc_works_without_the_in_process_api(self):
+        # Plugin host isolation: the REST route lives in another process and
+        # answers "unavailable"; the gateway's plugin RPC runs next to the hooks.
+        llm = FakeLLM(text="First suggestion")
+        module, ctx = self.start(llm)
+        self.assertIn("generate", ctx.rpc)
+        self.turn_done(ctx, "s-rpc")
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-rpc") or {}).get("text") == "First suggestion"))
+        self.store.set_regenerator(None)
+        llm.text = "Regenerated over RPC"
+        res = ctx.rpc["generate"]({"session_id": "s-rpc"}, session_id=None)
+        self.assertEqual(res, {"ok": True, "started": True})
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-rpc") or {}).get("text") == "Regenerated over RPC"))
+        self.assertEqual(ctx.rpc["generate"]({"session_id": "s-none"}, session_id=None),
+                         {"ok": False, "started": False, "reason": "no_turn"})
+        self.assertEqual(ctx.rpc["generate"]({}, session_id=None),
+                         {"ok": False, "started": False, "reason": "no_session"})
+
+    def test_older_host_without_rpc_still_registers(self):
+        llm = FakeLLM(text="x")
+        module = load_plugin()
+        self.modules.append(module)
+        ctx = FakeCtx(self.data_dir, llm)
+        del ctx.rpc
+        ctx.register_rpc = None  # attribute present but not callable, like a stubbed host
+        module.register(ctx)
+        self.assertEqual(set(ctx.hooks), {"pre_llm_call", "post_llm_call"})
 
 
 if __name__ == "__main__":
