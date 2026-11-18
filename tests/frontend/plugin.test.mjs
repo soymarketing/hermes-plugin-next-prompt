@@ -342,3 +342,12 @@ test('palette dismiss clears the visible suggestion', () => {
   assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
   assert.deepEqual(calls.clip, [])
 })
+
+test('palette generate requests a new suggestion', async () => {
+  resetCalls()
+  view('A')
+  serve('A', null)
+  render()
+  await command('next-prompt.generate').run()
+  assert.deepEqual(ctx.restCalls.at(-1), ['/generate?session_id=A', 'POST'])
+})

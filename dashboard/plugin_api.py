@@ -51,3 +51,15 @@ def dismiss_suggestion(session_id: str = Query("")):
     if session_id:
         _store().clear(session_id)
     return {"ok": True}
+
+
+@router.post("/generate")
+def generate_suggestion(session_id: str = Query("")):
+    if not session_id:
+        return {"ok": False, "started": False, "reason": "no_session"}
+    result = _store().regenerate(session_id)
+    if result is None:
+        return {"ok": False, "started": False, "reason": "unavailable"}
+    if not result:
+        return {"ok": False, "started": False, "reason": "no_turn"}
+    return {"ok": True, "started": True}

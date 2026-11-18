@@ -9,6 +9,7 @@ plugin-data dir: the desktop half reads them through
 survive screen switches and backend restarts.
 """
 
+from collections import OrderedDict
 import contextvars
 import hashlib
 import importlib.util
@@ -49,9 +50,19 @@ store = _load_store()
 # Per process is enough: a session's pre and post hooks run in the same one.
 _turn_seq: Dict[str, int] = {}
 _last_suggestion_time: Dict[str, float] = {}
+_MAX_CACHED_TURNS = 50
+_last_turns: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
 _lock = threading.Lock()
 _llm_task = None
 _ctx = None
+_SYNTHETIC_USER_PREFIXES = (
+    "[important: background process ",
+    "[background process ",
+    "[system: ",
+    "[async delegation complete",
+    "[async batch complete",
+    "[your active task list was preserved across context compression]",
+)
 
 
 def _get_settings() -> Dict[str, Any]:
@@ -200,12 +211,17 @@ def _prompt_messages(context: str, last_user: str = "") -> list:
 # closing question sit at its end, so keep more of the tail than the head.
 _HEAD_CHARS = 300
 _TAIL_CHARS = 900
-_MAX_SUGGESTION_CHARS = 160
+_MAX_SUGGESTION_CHARS = 220
 _NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
 _LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
 # "[result]", "[works / fails]", "<email>", "___": the user would have to edit
-# it before sending, which is as much work as typing it.
+# it before sending, which is as much work as typing it. Inline code spans that
+# look like code (`arr[0]`, `List<str>`, `foo.bar()`) are stripped first so
+# technical syntax survives while backtick-wrapped placeholders (`<email>`, `[name]`)
+# are still caught.
+_INLINE_CODE = re.compile(r"`[^`]+`")
+_CODE_SPAN_HINT = re.compile(r"[.(]|::|->|[A-Za-z0-9](?:\[|<)")
 _FILL_IN = re.compile(r"\[[^\]]*\]|<[^<>]+>|_{3,}")
 
 
@@ -251,30 +267,45 @@ def _build_context(messages: list, max_messages: int) -> str:
     return "\n\n".join(parts)
 
 
-def _clean(text: str) -> str:
+def _strip_code_spans(text: str) -> str:
+    return _INLINE_CODE.sub(lambda m: "" if _CODE_SPAN_HINT.search(m.group(0)[1:-1]) else m.group(0), text)
+
+
+def _clean_with_reason(text: str) -> tuple[str, str]:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     if not lines:
-        return ""
+        return "", "empty"
     text = lines[0]
     lowered = text.lower()
     for label in _LABELS:
         if lowered.startswith(label):
             text = text[len(label):].strip()
             break
-    if _FILL_IN.search(text):
-        return ""  # a blank to fill in or options to delete saves no typing
+    candidate = text
+    if len(candidate) >= 2 and _QUOTE_PAIRS.get(candidate[0]) == candidate[-1]:
+        candidate = candidate[1:-1].strip()
+    if _FILL_IN.search(_strip_code_spans(candidate)):
+        return "", "fill_in_placeholder"  # a blank to fill in or options to delete saves no typing
     text = text.strip("*_ ").strip()
     if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
         text = text[1:-1].strip()
+    if not text:
+        return "", "empty"
     if text.upper().rstrip(".!") in _NULL_ANSWERS or text.upper().startswith("NULL"):
-        return ""
-    if len(text) < 3 or len(text) > _MAX_SUGGESTION_CHARS:
-        return ""
-    return text
+        return "", "null_answer"
+    if len(text) < 3:
+        return "", "too_short"
+    if len(text) > _MAX_SUGGESTION_CHARS:
+        return "", "too_long"
+    return text, ""
 
 
-def _generate_suggestion(session_id: str, seq: int, messages: list, settings: dict) -> None:
-    context = _build_context(messages, settings["max_context_messages"])
+def _clean(text: str) -> str:
+    cleaned, _ = _clean_with_reason(text)
+    return cleaned
+
+
+def _generate_from_context(session_id: str, seq: int, context: str, last_user: str) -> None:
     if not context.strip():
         return
     try:
@@ -283,13 +314,13 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             return
         kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
-            messages=_prompt_messages(context, _last_user_text(messages)),
+            messages=_prompt_messages(context, last_user),
             max_tokens=100,
             temperature=0.3,
             purpose="next-prompt suggestion",
             **kwargs,
         )
-        text = _clean(getattr(result, "text", ""))
+        text, drop_reason = _clean_with_reason(getattr(result, "text", ""))
     except Exception as exc:
         logger.warning("next-prompt: suggestion generation failed for %s", session_id, exc_info=True)
         with _lock:
@@ -304,6 +335,7 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
             return  # the user already moved on; this suggestion is stale
         if not text:
             store.clear(session_id)
+            logger.info("next-prompt: dropped suggestion for %s (reason=%s)", session_id, drop_reason)
             return
         suggestion = store.put_suggestion(session_id, text)
         if suggestion is None:
@@ -312,12 +344,48 @@ def _generate_suggestion(session_id: str, seq: int, messages: list, settings: di
     logger.info("next-prompt: stored suggestion for session %s", session_id)
 
 
+def _generate_suggestion(session_id: str, seq: int, messages: list, settings: dict) -> None:
+    context = _build_context(messages, settings["max_context_messages"])
+    _generate_from_context(session_id, seq, context, _last_user_text(messages))
+
+
+def _cache_turn(session_id: str, context: str, last_user: str) -> None:
+    if not context.strip():
+        return
+    _last_turns[session_id] = (context, last_user)
+    _last_turns.move_to_end(session_id)
+    while len(_last_turns) > _MAX_CACHED_TURNS:
+        _last_turns.popitem(last=False)
+
+
+def regenerate(session_id: str) -> bool:
+    """Manually trigger suggestion generation using the last cached turn."""
+    settings = _get_settings()
+    if not session_id or not settings["enabled"]:
+        return False
+    with _lock:
+        cached = _last_turns.get(session_id)
+        if cached is None:
+            return False
+        _last_turns.move_to_end(session_id)
+        context, last_user = cached
+        seq = _turn_seq.get(session_id, 0) + 1
+        _turn_seq[session_id] = seq
+    _spawn(_generate_from_context, session_id, seq, context, last_user)
+    return True
+
+
 # ── hooks ────────────────────────────────────────────────────────────────
+
+def _is_synthetic_turn(kwargs: dict) -> bool:
+    user_msg = kwargs.get("user_message")
+    return isinstance(user_msg, str) and user_msg.lstrip().lower().startswith(_SYNTHETIC_USER_PREFIXES)
+
 
 def _on_pre_llm_call(**kwargs) -> None:
     """The user sent their own next message: any pending suggestion is moot."""
     session_id = kwargs.get("session_id") or ""
-    if not session_id:
+    if not session_id or _is_synthetic_turn(kwargs):
         return
     with _lock:
         _turn_seq[session_id] = _turn_seq.get(session_id, 0) + 1
@@ -333,17 +401,20 @@ def _on_post_llm_call(**kwargs) -> None:
     messages = kwargs.get("conversation_history") or []
     if not session_id or len(messages) < 2:
         return
-    # Only surfaces that render the pill; messaging turns (Telegram, …) would
+    # Only surfaces that render the pill; messaging/synthetic turns would
     # spend an LLM call on a suggestion nobody can see.
-    if (kwargs.get("platform") or "") not in _UI_PLATFORMS:
+    if _is_synthetic_turn(kwargs) or (kwargs.get("platform") or "") not in _UI_PLATFORMS:
         return
+    context = _build_context(messages, settings["max_context_messages"])
+    last_user = _last_user_text(messages)
+    with _lock:
+        _cache_turn(session_id, context, last_user)
+        seq = _turn_seq.get(session_id, 0)
     if time.time() - _last_suggestion_time.get(session_id, 0) < settings["cooldown_seconds"]:
         return
-    with _lock:
-        seq = _turn_seq.get(session_id, 0)
     # The worker must inherit this profile's secret/home scope, or ctx.llm
     # fails with UnscopedSecretError.
-    _spawn(_generate_suggestion, session_id, seq, list(messages), settings)
+    _spawn(_generate_from_context, session_id, seq, context, last_user)
 
 
 def _spawn(target, *args) -> None:
@@ -375,4 +446,5 @@ def register(ctx):
         _llm_task = None  # older host: plain main-model call
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    store.set_regenerator(regenerate)
     logger.info("next-prompt: registered (%d saved suggestion(s) in %s)", store.count(), store.DB_FILE)
