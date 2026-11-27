@@ -4,7 +4,9 @@
  * After a turn finishes, polls this plugin's Python backend (through
  * `ctx.rest`, which routes to the right backend and carries auth) for an
  * AI-generated follow-up and shows it as a subtle pill below the composer
- * (one pill per option, up to three, when the agent offered a choice).
+ * (one pill per option, up to three, when the agent offered a choice; a
+ * click adds that option and keeps the row, so several combine into one
+ * message).
  * Click → the text goes into the composer (not sent) through the SDK's
  * `host.composer`, or to the clipboard on hosts without it. ⌘/Ctrl-click sends
  * it straight away through `host.composer.submit`. × → dismiss.
@@ -22,6 +24,10 @@ let pluginCtx = null
 
 /** `${storedSessionId}:${kind}:${timestamp}` the user dismissed or used. */
 const $handled = atom(null)
+/** handledKey → indexes of a choice row's options already put in the
+ *  composer (the row stays so more can be added). Last few rows only. */
+const $added = atom({})
+const MAX_ADDED_ROWS = 20
 /** storedSessionId → last epoch ms that chat was seen working. Data fetched
  *  before then predates the turn and waits for a fresh fetch. The backend is
  *  the authority on "still pending" (it drops the suggestion the moment the
@@ -106,13 +112,8 @@ function optionsOf(suggestion) {
   return (listed.length ? listed : [suggestion.text]).slice(0, MAX_OPTIONS)
 }
 
-/** Use one reply: `text` picks an option; the keybind and palette take the
- *  most likely one. Using any option settles the whole set. */
-async function useSuggestion(entry, { send = false, text = entry.suggestion.text } = {}) {
-  finish(entry)
-  // If sending is unavailable, fall back to the normal insert so nothing is lost.
-  if (send && sendFromComposer(entry.storedId, text)) return
-  if (await insertIntoComposer(text)) return
+/** Hosts without the composer API: the clipboard, with a notice. */
+async function copyFallback(text) {
   if (!pluginCtx) return
   try {
     await pluginCtx.os.writeClipboard(text)
@@ -120,6 +121,51 @@ async function useSuggestion(entry, { send = false, text = entry.suggestion.text
   } catch (error) {
     host.notifyError(error, pluginCtx.i18n.t('copyFailed'))
   }
+}
+
+/** Use one reply and settle the suggestion: the single pill, and ⌘/Ctrl-click
+ *  (send now) on any option. */
+async function useSuggestion(entry, { send = false, text = entry.suggestion.text } = {}) {
+  finish(entry)
+  // If sending is unavailable, fall back to the normal insert so nothing is lost.
+  if (send && sendFromComposer(entry.storedId, text)) return
+  if (await insertIntoComposer(text)) return
+  await copyFallback(text)
+}
+
+const addedFor = handledKey => $added.get()[handledKey] || []
+
+function setAdded(handledKey, indexes) {
+  const rows = Object.entries({ ...$added.get(), [handledKey]: indexes })
+  $added.set(Object.fromEntries(rows.slice(-MAX_ADDED_ROWS)))
+}
+
+/** A choice row: append one option to the composer (the host's 'block' mode
+ *  adds a paragraph at the end, never replaces) and keep the row, so several
+ *  options combine into one message. The row settles once every option is
+ *  in, on ×, or when the message is sent. Without the composer API it falls
+ *  back to the one-shot copy. */
+async function addOption(entry, index) {
+  const options = optionsOf(entry.suggestion)
+  const text = options[index]
+  const before = addedFor(entry.handledKey)
+  if (text == null || before.includes(index)) return
+  setAdded(entry.handledKey, [...before, index]) // before the await: a double click adds once
+  if (!(await insertIntoComposer(text))) {
+    setAdded(entry.handledKey, addedFor(entry.handledKey).filter(i => i !== index))
+    finish(entry)
+    await copyFallback(text)
+    return
+  }
+  if (addedFor(entry.handledKey).length >= options.length) finish(entry)
+}
+
+/** Index of the option the keybind and the palette act on: the most likely
+ *  one not yet added. */
+function nextOption(entry) {
+  const added = addedFor(entry.handledKey)
+  const index = optionsOf(entry.suggestion).findIndex((_, i) => !added.includes(i))
+  return index < 0 ? 0 : index
 }
 
 /** The suggestion on screen for the focused chat, if any. Read at call time,
@@ -137,7 +183,8 @@ function useVisibleSuggestion() {
     return
   }
   haptic('tap')
-  void useSuggestion(entry)
+  if (optionsOf(entry.suggestion).length > 1) void addOption(entry, nextOption(entry))
+  else void useSuggestion(entry)
 }
 
 function dismissVisibleSuggestion() {
@@ -233,31 +280,38 @@ const choiceClass = cn(
 )
 
 /** The agent offered a choice: one pill per option, the likely one first and
- *  marked, and one × for the whole row. */
+ *  marked, and one × for the whole row. An option already in the composer
+ *  shows a check. */
 function SuggestionChoices({ storedId, suggestion, handledKey, options }) {
   const t = usePluginI18n(ID)
   const entry = { storedId, suggestion, handledKey }
+  const added = useValue($added)[handledKey] || []
 
-  const choice = (text, index) =>
-    jsx(
+  const choice = (text, index) => {
+    const isAdded = added.includes(index)
+    const icon = isAdded ? 'check' : index === 0 ? 'sparkle' : null
+    return jsx(
       Tip,
       {
-        label: t('tip'),
+        label: t('tipChoice'),
         children: jsxs('button', {
           type: 'button',
-          className: choiceClass,
+          'aria-pressed': isAdded,
+          className: cn(choiceClass, isAdded && 'border-(--ui-accent) text-(--ui-accent)'),
           onClick: event => {
             haptic('tap')
-            return useSuggestion(entry, { send: wantsSend(event), text })
+            if (wantsSend(event)) return useSuggestion(entry, { send: true, text })
+            return addOption(entry, index)
           },
           children: [
-            index === 0 ? jsx(Codicon, { name: 'sparkle', className: 'shrink-0 text-[0.75rem] opacity-70' }) : null,
+            icon ? jsx(Codicon, { name: icon, className: 'shrink-0 text-[0.75rem] opacity-70' }) : null,
             jsx('span', { className: 'truncate', children: text })
           ]
         })
       },
       `${index}:${text}`
     )
+  }
 
   return jsxs('div', {
     className: cn(rowClass, 'flex-wrap gap-1.5'),
@@ -375,6 +429,7 @@ export default {
     ctx.i18n.register({
       en: {
         tip: 'Click to put this follow-up in the composer · ⌘/Ctrl-click to send it now',
+        tipChoice: 'Click to add this option to the composer; add more to combine them · ⌘/Ctrl-click to send it now',
         dismiss: 'Dismiss suggestion',
         useLabel: 'Next Prompt: use suggestion',
         dismissLabel: 'Next Prompt: dismiss suggestion',
@@ -402,6 +457,7 @@ export default {
       },
       es: {
         tip: 'Clic para ponerlo en el compositor · ⌘/Ctrl-clic para enviarlo ya',
+        tipChoice: 'Clic para sumar esta opción al compositor; suma varias para combinarlas · ⌘/Ctrl-clic para enviarla ya',
         dismiss: 'Descartar sugerencia',
         useLabel: 'Next Prompt: usar sugerencia',
         dismissLabel: 'Next Prompt: descartar sugerencia',
@@ -457,7 +513,10 @@ export default {
           label: t('useLabel'),
           action: 'next-prompt.use',
           keywords: ['next prompt', 'suggestion', 'follow-up', 'sugerencia'],
-          detail: () => current()?.suggestion.text || t('nothingToUse'),
+          detail: () => {
+            const entry = current()
+            return entry ? optionsOf(entry.suggestion)[nextOption(entry)] : t('nothingToUse')
+          },
           run: useVisibleSuggestion
         }
       },
@@ -486,6 +545,7 @@ export default {
     ctx.onDispose(() => {
       pluginCtx = null
       visible = null
+      $added.set({})
       reportedError = false
     })
   }

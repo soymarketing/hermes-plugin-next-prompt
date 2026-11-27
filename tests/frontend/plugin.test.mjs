@@ -286,16 +286,64 @@ test('a single option, or a backend without options, keeps the one-pill look', (
   assert.deepEqual(choiceTexts(), ['Sin lista'])
 })
 
-test('clicking another option inserts that option and settles the whole row', async () => {
-  resetCalls()
+const withComposer = () => {
   host.composer = { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) }
+}
+const pressed = () => choiceButtons().map(b => b.props['aria-pressed'] === true)
+const dismissCalls = () => ctx.restCalls.filter(([path]) => path.startsWith('/dismiss')).length
+
+test('clicking an option adds it to the composer and keeps the row, so several combine', async () => {
+  resetCalls()
+  withComposer()
   view('A')
   serve('A', choice('A', ['Empieza por las imágenes', 'Empieza por el plugin de chat', 'Empieza por la caché']))
+  const dismissed = dismissCalls()
   await choiceButtons()[1].props.onClick()
   assert.deepEqual(calls.insert, [[null, 'Empieza por el plugin de chat', { mode: 'block' }]])
-  assert.deepEqual(choiceTexts(), [], 'every option disappears once one is used')
+  assert.equal(choiceTexts().length, 3, 'the row stays for more options')
+  assert.deepEqual(pressed(), [false, true, false], 'the added option is marked')
+  await choiceButtons()[0].props.onClick()
+  assert.deepEqual(
+    calls.insert.map(([, text]) => text),
+    ['Empieza por el plugin de chat', 'Empieza por las imágenes'],
+    'each click appends a paragraph (block mode) instead of replacing'
+  )
+  assert.equal(dismissCalls(), dismissed, 'nothing settled on the server while the row is open')
+  delete host.composer
+})
+
+test('an option already added is not added twice', async () => {
+  resetCalls()
+  withComposer()
+  view('A')
+  serve('A', choice('A', ['Uno solo', 'Otro']))
+  const button = choiceButtons()[0]
+  await Promise.all([button.props.onClick(), button.props.onClick()])
+  await choiceButtons()[0].props.onClick()
+  assert.deepEqual(calls.insert.map(([, text]) => text), ['Uno solo'])
+  delete host.composer
+})
+
+test('the row settles once every option is in', async () => {
+  resetCalls()
+  withComposer()
+  view('A')
+  serve('A', choice('A', ['Primera', 'Segunda']))
+  await choiceButtons()[0].props.onClick()
+  await choiceButtons()[1].props.onClick()
+  assert.deepEqual(choiceTexts(), [])
   assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
   delete host.composer
+})
+
+test('without the composer API, an option is copied and the row settles', async () => {
+  resetCalls()
+  delete host.composer
+  view('A')
+  serve('A', choice('A', ['Copia esta', 'O esta']))
+  await choiceButtons()[1].props.onClick()
+  assert.deepEqual(calls.clip, ['O esta'])
+  assert.deepEqual(choiceTexts(), [])
 })
 
 test('⌘/Ctrl-click on an option sends that option', async () => {
@@ -361,16 +409,20 @@ test('the keybind uses the suggestion shown in the focused chat', async () => {
   delete host.composer
 })
 
-test('with a choice, the keybind and the palette take the most likely option', async () => {
+test('with a choice, the keybind adds the most likely option not added yet', async () => {
   resetCalls()
   host.composer = { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) }
   view('A')
-  serve('A', choice('A', ['La probable', 'La otra']))
+  serve('A', choice('A', ['La probable', 'La otra', 'La tercera']))
   render()
   assert.equal(command('next-prompt.use').detail(), 'La probable')
   keybind().run()
   await sleep(1)
-  assert.deepEqual(calls.insert, [[null, 'La probable', { mode: 'block' }]])
+  render()
+  assert.equal(command('next-prompt.use').detail(), 'La otra', 'the palette previews the next one')
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.insert.map(([, text]) => text), ['La probable', 'La otra'])
   delete host.composer
 })
 

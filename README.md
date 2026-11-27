@@ -53,8 +53,12 @@ or *dismiss suggestion*:
   hold the modifier. If the host cannot submit, it falls back to filling the
   composer.
 - **When the agent offered a choice**, each option is its own pill; the most
-  likely one comes first with the sparkle, and the shortcut and the palette
-  use it. Using any option clears the row, and one × dismisses them all.
+  likely one comes first with the sparkle. A click adds that option to the
+  composer and marks it with a check, and the row stays: click another to
+  combine them into one message (each goes in as its own paragraph), then
+  send as usual. The shortcut and the palette add the most likely option not
+  added yet. The row goes away when you send, when every option is in, or
+  with its ×. ⌘/Ctrl-click still sends that one option right away.
 - **Click ×** to dismiss it. Sending your own message clears it too.
 - **No pill, or not the one you wanted?** Ctrl/⌘+K → *Next Prompt: generate
   suggestion* asks for a new one from the chat's last turn, without sending a

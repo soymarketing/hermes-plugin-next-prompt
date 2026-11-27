@@ -11,6 +11,12 @@
   one pill. Measured on 11 conversations (Claude Sonnet 5.5 and GPT-6.1
   Terra): every choice got 2–3 options; every yes/no offer, finished
   task and no-suggestion case still got one pill or none.
+- **Combine options into one message.** Clicking an option adds it to the
+  composer and keeps the row, so you can add another ("do the images and the
+  cache"); each lands as its own paragraph. The row goes away when you send,
+  when every option is in, or with its ×. ⌘/Ctrl-click still sends one
+  option at once. Without the composer API (older Desktop) a click copies
+  that option, as before.
 - **API:** the suggestion payload adds `options` (every reply to show, `text`
   first). `text` is unchanged, so one-pill clients keep working. Stores from
   0.3.5 gain the column in place.
