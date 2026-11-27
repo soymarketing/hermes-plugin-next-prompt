@@ -194,7 +194,8 @@ function dismissVisibleSuggestion() {
 
 // The gateway's plugin RPC runs the handler where the plugin's hooks run, so it
 // reaches the cached turn even when the dashboard API is in another process.
-// Older hosts (no RPC, or the method not loaded yet) fall back to REST.
+// Backends without it (older hosts, a dashboard with no gateway session
+// authority) fall back to REST, which queues the request for the hooks' process.
 async function requestGenerate(sessionId) {
   if (typeof host.request === 'function') {
     try {
@@ -436,7 +437,7 @@ export default {
         generateLabel: 'Next Prompt: generate suggestion',
         nothingToUse: 'No follow-up suggestion in this chat right now',
         nothingToGenerate: 'No recent turn available to generate a suggestion',
-        generateUnavailable: 'Regeneration is unavailable when the plugin API runs in a separate process',
+        generateUnavailable: 'Next Prompt is not running in this backend right now, so it cannot generate a suggestion',
         generateFailed: 'Could not generate a suggestion',
         copied: 'Suggestion copied — paste it into the composer',
         copyFailed: 'Could not copy the suggestion',
@@ -464,7 +465,7 @@ export default {
         generateLabel: 'Next Prompt: generar sugerencia',
         nothingToUse: 'No hay sugerencia de seguimiento en este chat ahora',
         nothingToGenerate: 'No hay un turno reciente para generar una sugerencia',
-        generateUnavailable: 'La regeneración no está disponible cuando la API del plugin corre en otro proceso',
+        generateUnavailable: 'Next Prompt no está corriendo ahora en este backend, así que no puede generar una sugerencia',
         generateFailed: 'No se pudo generar una sugerencia',
         copied: 'Sugerencia copiada — pégala en el compositor',
         copyFailed: 'No se pudo copiar la sugerencia',

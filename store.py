@@ -11,7 +11,10 @@ read and write. WAL lets one process read while the other writes.
 One row per session in ``pending``: the pending suggestion (``text``, plus up
 to two ``alternatives`` as a JSON list when the agent offered a choice), or
 the reason the last one could not be generated. ``turns`` keeps each session's last trimmed
-context, so "generate suggestion" also works after a restart. Both halves load this file by path (the host imports
+context, so "generate suggestion" also works after a restart. ``requests`` carries a
+"generate suggestion" from a process without the hooks (the dashboard API in a plugin host, on a
+backend with no plugin RPC) to one that runs them; ``worker.alive`` in the data directory says one
+is running, ``regenerate.request`` that a request is waiting. Both halves load this file by path (the host imports
 ``plugin_api.py`` with no package), so it holds no state of its own.
 """
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -53,6 +57,12 @@ MAX_ROWS = 200
 # prompt uses (not the transcript), the most recent sessions only.
 TURN_TTL_SECONDS = SUGGESTION_TTL_SECONDS
 MAX_TURNS = 50
+# A queued "generate suggestion" is only worth serving while the user still
+# waits for it; a process that runs the hooks marks itself alive this often.
+REQUEST_TTL_SECONDS = 30.0
+WORKER_FRESH_SECONDS = 15.0
+REQUEST_FILE = "regenerate.request"
+WORKER_FILE = "worker.alive"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending (
@@ -70,6 +80,13 @@ CREATE TABLE IF NOT EXISTS turns (
     context    TEXT NOT NULL,
     last_user  TEXT,
     timestamp  REAL NOT NULL
+)
+"""
+
+_REQUESTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS requests (
+    session_id   TEXT PRIMARY KEY,
+    requested_at REAL NOT NULL
 )
 """
 
@@ -112,6 +129,7 @@ def _connect() -> Optional[sqlite3.Connection]:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_SCHEMA)
         conn.execute(_TURNS_SCHEMA)
+        conn.execute(_REQUESTS_SCHEMA)
         _add_alternatives_column(conn)
         return conn
     except Exception as exc:
@@ -319,3 +337,104 @@ def get_turn(session_id: str) -> Optional[tuple]:
     if not row or not row[0] or time.time() - float(row[2] or 0) >= TURN_TTL_SECONDS:
         return None
     return row[0], row[1] or ""
+
+
+# ── "generate suggestion" across processes ──────────────────────────────
+
+
+def _marker_age(name: str) -> Optional[float]:
+    directory = data_dir()
+    if directory is None:
+        return None
+    try:
+        return time.time() - (directory / name).stat().st_mtime
+    except OSError:
+        return None
+
+
+def _touch_marker(name: str) -> None:
+    directory = data_dir()
+    if directory is None:
+        return
+    try:
+        path = directory / name
+        path.touch(exist_ok=True)
+        os.utime(path, None)
+    except OSError as exc:
+        logger.debug("next-prompt: could not touch %s: %s", name, exc)
+
+
+def mark_worker_alive() -> None:
+    """A process that runs the hooks can serve queued requests right now."""
+    _touch_marker(WORKER_FILE)
+
+
+def worker_alive() -> bool:
+    age = _marker_age(WORKER_FILE)
+    return age is not None and age < WORKER_FRESH_SECONDS
+
+
+def request_stamp() -> Optional[float]:
+    """When the last request was queued (the marker's mtime), else None.
+
+    A cheap check for the polling side: it opens the database only when
+    this changes."""
+    directory = data_dir()
+    if directory is None:
+        return None
+    try:
+        return (directory / REQUEST_FILE).stat().st_mtime
+    except OSError:
+        return None
+
+
+def request_regeneration(session_id: str) -> Optional[bool]:
+    """Queue "generate suggestion" for a process that runs the hooks.
+
+    None when no such process is alive (or the store is unreachable), False
+    when the session has no saved turn to generate from, True when queued."""
+    if not session_id or not worker_alive():
+        return None
+    if get_turn(session_id) is None:
+        return False
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        with closing(conn), conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO requests (session_id, requested_at) VALUES (?, ?)",
+                (session_id, time.time()),
+            )
+    except sqlite3.Error as exc:
+        logger.warning("next-prompt: could not queue a suggestion for %s: %s", session_id, exc)
+        return None
+    _touch_marker(REQUEST_FILE)
+    return True
+
+
+def claim_requests() -> List[str]:
+    """Take every queued request still worth serving, oldest first.
+
+    The delete and the read are one transaction, so when several processes
+    run the hooks only one of them gets each request."""
+    conn = _connect()
+    if conn is None:
+        return []
+    try:
+        with closing(conn):
+            conn.execute("BEGIN IMMEDIATE")  # the write lock first: no other process reads these rows
+            try:
+                rows = conn.execute(
+                    "SELECT session_id, requested_at FROM requests ORDER BY requested_at"
+                ).fetchall()
+                conn.execute("DELETE FROM requests")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+    except sqlite3.Error as exc:
+        logger.warning("next-prompt: could not read queued suggestions: %s", exc)
+        return []
+    cutoff = time.time() - REQUEST_TTL_SECONDS
+    return [row[0] for row in rows if float(row[1] or 0) >= cutoff]

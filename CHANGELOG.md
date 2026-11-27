@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **"Generate suggestion" works on a dashboard backend.** Desktop connected
+  to a `hermes dashboard` (no gateway session authority) has no plugin RPC,
+  and the dashboard runs a profile's plugin API in a plugin host, apart from
+  the process that runs the hooks, so the palette action answered "Regeneration
+  is unavailable…". The API now queues the request in the plugin's SQLite
+  store, and every process that runs the hooks checks for one each second
+  and generates it. The note now only appears when no such process has been
+  running for 15 seconds.
+- **Updates take effect without a restart.** A process that reloaded the
+  plugin after `hermes plugins install` or `update` kept the previous
+  version's `store.py`, so new code could call functions it did not have.
+  The store module is now keyed by its content as well as its path.
+
 ## 0.3.6
 
 - **One pill per option when the agent offers a choice.** When the agent's

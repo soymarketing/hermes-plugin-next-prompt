@@ -25,7 +25,10 @@ router = APIRouter()
 
 def _store():
     path = Path(__file__).resolve().parents[1] / "store.py"
-    name = "next_prompt_store_" + hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    # Same key as __init__.py (path and content), so both halves share one
+    # module, and an updated store.py is loaded fresh.
+    key = str(path).encode("utf-8") + b"\0" + path.read_bytes()
+    name = "next_prompt_store_" + hashlib.sha256(key).hexdigest()[:12]
     module = sys.modules.get(name)
     if module is None:
         spec = importlib.util.spec_from_file_location(name, path)
@@ -57,7 +60,13 @@ def dismiss_suggestion(session_id: str = Query("")):
 def generate_suggestion(session_id: str = Query("")):
     if not session_id:
         return {"ok": False, "started": False, "reason": "no_session"}
-    result = _store().regenerate(session_id)
+    store = _store()
+    result = store.regenerate(session_id)
+    if result is None:
+        # The hooks run in another process (this API is in a plugin host) and
+        # the client had no plugin RPC to reach them (a dashboard without a
+        # gateway session authority): leave the request for that process.
+        result = store.request_regeneration(session_id)
     if result is None:
         return {"ok": False, "started": False, "reason": "unavailable"}
     if not result:

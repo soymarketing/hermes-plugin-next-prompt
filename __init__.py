@@ -34,7 +34,10 @@ def _load_store():
     """``store.py``, loaded by path like ``plugin_api.py`` does, so both halves
     of one install share a single module object."""
     path = Path(__file__).resolve().with_name("store.py")
-    name = "next_prompt_store_" + hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    # Keyed by the file's content too: a process that reloads the plugin after
+    # an update must not keep the previous version's store module.
+    key = str(path).encode("utf-8") + b"\0" + path.read_bytes()
+    name = "next_prompt_store_" + hashlib.sha256(key).hexdigest()[:12]
     module = sys.modules.get(name)
     if module is None:
         spec = importlib.util.spec_from_file_location(name, path)
@@ -56,6 +59,10 @@ _last_turns: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
 _lock = threading.Lock()
 _llm_task = None
 _ctx = None
+# How often this process looks for a "generate suggestion" queued by a
+# process without the hooks (store.request_regeneration), and says it is alive.
+_REQUEST_POLL_SECONDS = 1.0
+_ALIVE_EVERY_SECONDS = 5.0
 _SYNTHETIC_USER_PREFIXES = (
     "[important: background process ",
     "[background process ",
@@ -514,14 +521,56 @@ def _on_post_llm_call(**kwargs) -> None:
     _spawn(_generate_from_context, session_id, seq, context, last_user)
 
 
-def _spawn(target, *args) -> None:
+def _spawn(target, *args, name: str = "next-prompt") -> None:
     try:
         from agent.memory_provider import spawn_context_thread
     except ImportError:  # older hosts: same thing by hand
         ctx_copy = contextvars.copy_context()
-        threading.Thread(target=ctx_copy.run, args=(target, *args), daemon=True).start()
+        threading.Thread(target=ctx_copy.run, args=(target, *args), name=name, daemon=True).start()
         return
-    spawn_context_thread(target, name="next-prompt", args=args).start()
+    spawn_context_thread(target, name=name, args=args).start()
+
+
+# ── "generate suggestion" queued by another process ──────────────────────
+
+def _serve_queued_requests(last_stamp):
+    """One poll: regenerate what was queued since ``last_stamp``; returns the
+    stamp to compare against next time."""
+    stamp = store.request_stamp()
+    if stamp is None or stamp == last_stamp:
+        return last_stamp
+    for session_id in store.claim_requests():
+        regenerate(session_id)
+    return stamp
+
+
+def _request_loop(stop: threading.Event) -> None:
+    """Serve "generate suggestion" for clients that cannot reach this process.
+
+    On a backend without plugin RPC (a dashboard with no gateway session
+    authority) the palette action can only reach the dashboard API, and that
+    may run in another process (a plugin host) than these hooks. It queues
+    the request in the store; this loop, in every process that runs the
+    hooks, picks it up. Runs in the register() scope, so ctx.llm and the store
+    resolve to this plugin's profile."""
+    last_stamp = None
+    last_alive = 0.0
+    warned = False
+    while True:
+        try:
+            now = time.time()
+            if now - last_alive >= _ALIVE_EVERY_SECONDS:
+                store.mark_worker_alive()
+                last_alive = now
+            last_stamp = _serve_queued_requests(last_stamp)
+        except Exception:  # noqa: BLE001 — a bad poll must not end the loop
+            # Once at warning level: a loop that can never poll (no profile
+            # scope, unreadable store) must be visible in the log.
+            logger.log(logging.DEBUG if warned else logging.WARNING,
+                       "next-prompt: could not check for queued suggestions", exc_info=True)
+            warned = True
+        if stop.wait(_REQUEST_POLL_SECONDS):
+            return
 
 
 # ── registration ─────────────────────────────────────────────────────────
@@ -554,6 +603,15 @@ def register(ctx):
             register_rpc("generate", _rpc_generate)
         except Exception:  # noqa: BLE001 — older host or rejected name: REST stays the fallback
             logger.debug("next-prompt: plugin RPC unavailable", exc_info=True)
+    # Backends without plugin RPC: serve the REST route's queued requests.
+    stop = threading.Event()
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        try:
+            on_unload(stop.set)
+        except Exception:  # noqa: BLE001 — the loop is a daemon thread either way
+            logger.debug("next-prompt: on_unload unavailable", exc_info=True)
+    _spawn(_request_loop, stop, name="next-prompt-requests")
     logger.info("next-prompt: registered (%d saved suggestion(s) in %s)", store.count(), store.DB_FILE)
 
 

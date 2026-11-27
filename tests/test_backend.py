@@ -59,10 +59,15 @@ class FakeLLM:
         return types.SimpleNamespace(text=self.text)
 
 
+LIVE_CTXS: list = []
+
+
 class FakeCtx:
     """The slice of PluginContext the plugin touches."""
 
     def __init__(self, data_dir, llm, settings=None, aux_tasks=True):
+        LIVE_CTXS.append(self)
+        self.unload_callbacks: list = []
         self.hooks: dict = {}
         self.rpc: dict = {}
         self.llm = llm
@@ -77,6 +82,14 @@ class FakeCtx:
 
     def register_rpc(self, name, fn):
         self.rpc[name] = fn
+
+    def on_unload(self, callback):
+        self.unload_callbacks.append(callback)
+
+    def unload(self):
+        for callback in reversed(self.unload_callbacks):
+            callback()
+        self.unload_callbacks.clear()
 
 
 def wait_for(predicate, timeout=5.0):
@@ -114,7 +127,9 @@ class PluginTestCase(unittest.TestCase):
             os.environ["HERMES_HOME"] = previous
 
     def _unload(self):
-        # Let workers finish before the temp dirs go away.
+        # Stop the request loops, then let workers finish before the temp dirs go away.
+        while LIVE_CTXS:
+            LIVE_CTXS.pop().unload()
         for thread in threading.enumerate():
             if thread.name.startswith("next-prompt") and thread is not threading.current_thread():
                 thread.join(timeout=5)
@@ -319,6 +334,31 @@ class GenerationTests(PluginTestCase):
         self.assertEqual(len(module._last_turns), limit)
         self.assertNotIn("s-0", module._last_turns)
         self.assertIn(f"s-{limit + 4}", module._last_turns)
+
+
+class ReloadTests(unittest.TestCase):
+    def test_reload_after_an_update_loads_the_new_store(self):
+        """A process that reloads the plugin after `hermes plugins install`
+        must not keep the previous version's store.py (it lacked functions
+        the new __init__.py calls)."""
+        tree = Path(tempfile.mkdtemp(prefix="next-prompt-tree-"))
+        self.addCleanup(shutil.rmtree, tree, ignore_errors=True)
+        for name in ("__init__.py", "store.py"):
+            shutil.copy(ROOT / name, tree / name)
+
+        def load(tag):
+            spec = importlib.util.spec_from_file_location(f"np_reload_{tag}", tree / "__init__.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        first = load("a")
+        self.assertIs(load("b").store, first.store)  # unchanged file: one shared module
+        with open(tree / "store.py", "a", encoding="utf-8") as fh:
+            fh.write("\n\ndef added_in_update():\n    return 42\n")
+        updated = load("c")
+        self.assertIsNot(updated.store, first.store)
+        self.assertEqual(updated.store.added_in_update(), 42)
 
 
 class LegacyStoreTests(PluginTestCase):
@@ -711,6 +751,83 @@ class RestApiTests(PluginTestCase):
         res = ctx2.rpc["generate"]({"session_id": "s-old"}, session_id=None)
         self.assertEqual(res, {"ok": True, "started": True})
         self.assertTrue(wait_for(lambda: (self.suggestion("s-old") or {}).get("text") == "After restart"))
+
+    def test_generate_endpoint_queues_for_the_hooks_process(self):
+        # A dashboard with no gateway session authority answers the plugin RPC
+        # with -32601, and its plugin API runs in a plugin host: REST queues the
+        # request and the process running the hooks generates it.
+        llm = FakeLLM(text="First suggestion")
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s-q")
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-q") or {}).get("text") == "First suggestion"))
+        self.assertTrue(wait_for(self.store.worker_alive))
+        self.store.set_regenerator(None)  # the API's process has no hooks
+        llm.text = "Queued suggestion"
+        res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-q"})
+        self.assertEqual(res.json(), {"ok": True, "started": True})
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-q") or {}).get("text") == "Queued suggestion"))
+        self.assertEqual(self.store.claim_requests(), [])  # served once
+
+    def test_generate_endpoint_without_a_saved_turn(self):
+        module, ctx = self.start(FakeLLM())
+        self.assertTrue(wait_for(self.store.worker_alive))
+        self.store.set_regenerator(None)
+        res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-none"})
+        self.assertEqual(res.json(), {"ok": False, "started": False, "reason": "no_turn"})
+
+    def test_generate_endpoint_unavailable_when_the_hooks_process_is_gone(self):
+        module, ctx = self.start(FakeLLM())
+        self.turn_done(ctx, "s-gone")
+        self.assertTrue(wait_for(self.store.worker_alive))
+        ctx.unload()  # the loop stops; its last mark goes stale
+        self.store.set_regenerator(None)
+        marker = self.store.data_dir() / self.store.WORKER_FILE
+        old = time.time() - self.store.WORKER_FRESH_SECONDS - 1
+        os.utime(marker, (old, old))
+        res = self.client.post("/api/plugins/next-prompt/generate", params={"session_id": "s-gone"})
+        self.assertEqual(res.json(), {"ok": False, "started": False, "reason": "unavailable"})
+        self.assertEqual(self.store.claim_requests(), [])
+
+    def test_request_queued_by_another_process_is_served(self):
+        """The Panel case end to end: the request comes from a separate
+        interpreter (the plugin host), the hooks run here."""
+        llm = FakeLLM(text="First")
+        module, ctx = self.start(llm)
+        self.turn_done(ctx, "s-xproc")
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-xproc") or {}).get("text") == "First"))
+        self.assertTrue(wait_for(self.store.worker_alive))
+        llm.text = "Served across processes"
+        script = textwrap.dedent(f"""
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("np_store_child", {str(ROOT / "store.py")!r})
+            store = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(store)
+            assert store.request_regeneration("s-xproc") is True
+        """)
+        env = dict(os.environ, HERMES_HOME=str(self.home), PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        subprocess.run([sys.executable, "-c", script], env=env, check=True, timeout=60)
+        self.assertTrue(wait_for(lambda: (self.suggestion("s-xproc") or {}).get("text") == "Served across processes"))
+
+    def test_stale_requests_are_dropped(self):
+        self.store.mark_worker_alive()
+        self.assertTrue(self.store.put_turn("s-a", "ctx a", "u"))
+        self.assertTrue(self.store.put_turn("s-b", "ctx b", "u"))
+        self.assertTrue(self.store.request_regeneration("s-a"))
+        self.assertTrue(self.store.request_regeneration("s-b"))
+        conn = sqlite3.connect(self.db_path())
+        with conn:
+            conn.execute("UPDATE requests SET requested_at = ? WHERE session_id = 's-a'",
+                         (time.time() - self.store.REQUEST_TTL_SECONDS - 1,))
+        conn.close()
+        self.assertEqual(self.store.claim_requests(), ["s-b"])
+        self.assertEqual(self.store.claim_requests(), [])
+        self.assertIsNone(self.store.request_regeneration(""))
+
+    def test_unload_stops_the_request_loop(self):
+        module, ctx = self.start(FakeLLM())
+        self.assertTrue(wait_for(lambda: any(t.name == "next-prompt-requests" for t in threading.enumerate())))
+        ctx.unload()
+        self.assertTrue(wait_for(lambda: not any(t.name == "next-prompt-requests" for t in threading.enumerate())))
 
     def test_turn_store_is_bounded(self):
         for i in range(self.store.MAX_TURNS + 5):
