@@ -160,6 +160,14 @@ class GenerationTests(PluginTestCase):
         self.assertEqual(stored["text"], "Deploy to staging first")
         self.assertEqual(stored["options"], ["Deploy to staging first", "Go straight to production"])
 
+    def test_numbered_answers_are_one_suggestion(self):
+        module, ctx = self.start(FakeLLM(text="1. Yes, keep the discount\n2. Send it from my account"))
+        self.turn_done(ctx, "s-answers")
+        self.assertTrue(wait_for(lambda: self.has("s-answers")))
+        stored = self.suggestion("s-answers")
+        self.assertEqual(stored["text"], "1. Yes, keep the discount\n2. Send it from my account")
+        self.assertEqual(stored["options"], [stored["text"]])
+
     def test_a_single_suggestion_has_one_option(self):
         module, ctx = self.start()
         self.turn_done(ctx, "s-one")
@@ -458,9 +466,16 @@ class ContextAndCleanTests(unittest.TestCase):
             # A second unmarked line is the model explaining itself, not an option.
             ("Run the tests\nBecause the fix touched auth.py", ["Run the tests"]),
             ("- Deploy to staging first\n- Go straight to production", ["Deploy to staging first", "Go straight to production"]),
-            ("1. Empieza por las imágenes\n2. Empieza por el plugin\n3. Empieza por la caché",
+            ("* Empieza por las imágenes\n• Empieza por el plugin\n- Empieza por la caché",
              ["Empieza por las imágenes", "Empieza por el plugin", "Empieza por la caché"]),
             ("Options:\n- Uno sí\n- Dos sí", ["Uno sí", "Dos sí"]),
+            # Numbered lines answer the agent's numbered questions: ONE message.
+            ("1. Yes, keep the 10% discount\n2. Send it from my account",
+             ["1. Yes, keep the 10% discount\n2. Send it from my account"]),
+            ("1) Sí, con descuento\n2) Desde mi cuenta", ["1. Sí, con descuento\n2. Desde mi cuenta"]),
+            ("Answers:\n1. **Yes**\n2. \"From mine\"", ["1. Yes\n2. From mine"]),
+            # One answer that needs filling in spoils the whole message.
+            ("1. Yes, keep it\n2. Send it to [email]", []),
             ("- A uno\n- B dos\n- C tres\n- D cuatro", ["A uno", "B dos", "C tres"]),
             ("- Same thing\n- same thing", ["Same thing"]),
             # A bad option drops on its own; the rest survive.
@@ -473,6 +488,7 @@ class ContextAndCleanTests(unittest.TestCase):
             with self.subTest(raw=raw[:40]):
                 self.assertEqual(self.m._parse_options(raw)[0], expected)
         self.assertEqual(self.m._parse_options("- [a]\n- <b>"), ([], "fill_in_placeholder"))
+        self.assertEqual(self.m._parse_options("1. Sí, claro\n2. " + "x" * 240)[1], "too_long")
 
     def test_clean_with_reason_reports_drop_causes(self):
         self.assertEqual(self.m._clean_with_reason(""), ("", "empty"))

@@ -140,9 +140,12 @@ the option the conversation favours or the agent recommends, answer yes to a \
 proposal that matches what the user asked for, and include the requested \
 detail when the conversation contains it. When the agent asked them to try \
 something and report back, confirm they did it and give the most likely \
-outcome; the user corrects it if it went differently. When the agent asked \
-for several things (to confirm a step and to decide something), cover each \
-briefly, the confirmation first.
+outcome; the user corrects it if it went differently.
+
+When the agent asked several separate questions, answer every one, in the \
+order asked, a short sentence each, in one message. If the agent numbered \
+its questions, number the answers the same way, one per line ("1. ..." on \
+the first line, "2. ..." on the next).
 
 When the agent offers a real choice between distinct options (it names them \
 and asks which one: two deploy targets, which task to tackle first), write \
@@ -166,9 +169,9 @@ and a blank saves nothing.
 Writing rules:
 - Write in the language of the user's last message, whatever the language \
 of the topic, the names in it, or these instructions.
-- Each message short, under 80 characters, phrased the way the user writes \
-to the agent: a reply to the agent's question, or a request (usually \
-imperative).
+- Each message short: under 80 characters, or about 50 per question when it \
+answers several. Phrased the way the user writes to the agent: a reply to \
+the agent's question, or a request (usually imperative).
 - Each message ready to send as is: no brackets, blanks, placeholders or \
 alternatives inside one message ("X / Y", "X or Y?"). Deleting the options \
 that don't apply is as much work as typing the message.
@@ -192,6 +195,10 @@ User: "What's left?" Agent: "Three things are open: the login bug, the CSV expor
 - Do the CSV export first
 - Update the docs first
 User: "Email the report to the team" Agent: "Want me to attach the Q3 chart too?" -> Yes, attach the Q3 chart
+User: "Fix the login bug" Agent: "Fixed in auth.py. Should I add a regression test? And deploy it to staging now?" -> Yes, add the test. Deploy to staging too
+User: "Prepare the quote" Agent: "Two questions: 1. Keep the 10% discount? 2. Send it from your account or the shared inbox? I'd keep it and use yours." ->
+1. Yes, keep the 10% discount
+2. Send it from my account
 User: "The export button does nothing" Agent: "Fixed. Restart the app and tell me if it works." -> Restarted it, and the export button works now
 User: "Send the invoice" Agent: "I don't have the client's email. Which address?" -> NULL
 User: "Perfect, thanks!" Agent: "Anytime!" -> NULL
@@ -231,7 +238,11 @@ _TAIL_CHARS = 900
 _MAX_SUGGESTION_CHARS = 220
 # A real choice gets one pill per option the agent offered, most likely first.
 _MAX_OPTIONS = 3
-_LIST_MARKER = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
+_OPTION_MARKER = re.compile(r"^[-*•]\s+")
+# Answers to questions the agent numbered: one message, one numbered line each.
+_NUMBERED = re.compile(r"^(\d{1,2})[.)]\s+")
+_MAX_ANSWERS = 6
+_MAX_ANSWERS_CHARS = 480
 _NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
 _LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
@@ -325,22 +336,46 @@ def _clean(text: str) -> str:
     return cleaned
 
 
+def _numbered_answers(lines: list) -> tuple[str, str]:
+    """Numbered lines are ONE message answering the agent's numbered
+    questions: each line is cleaned on its own and keeps its number. Any line
+    that fails drops the whole message: an answer missing a question is wrong."""
+    answers = []
+    for line in lines[:_MAX_ANSWERS]:
+        number = _NUMBERED.match(line).group(1)
+        cleaned, reason = _clean_with_reason(_NUMBERED.sub("", line, count=1))
+        if not cleaned:
+            return "", reason
+        answers.append(f"{number}. {cleaned}")
+    message = "\n".join(answers)
+    if len(message) > _MAX_ANSWERS_CHARS:
+        return "", "too_long"
+    return message, ""
+
+
 def _parse_options(text: str) -> tuple[list, str]:
     """The replies to show, most likely first, or ``([], reason)``.
 
-    Several replies only when the model wrote a list (every line marked "- ",
-    "* " or "1."): a second unmarked line is an explanation the model added,
-    never an option. Each item is cleaned like a single suggestion; one that
-    fails is dropped on its own, and NULL first means no suggestion at all."""
+    Several replies only when the model wrote a bulleted list (every line
+    marked "- ", "* " or "•"): a second unmarked line is an explanation the
+    model added, never an option. Numbered lines ("1.", "2.") are a single
+    reply answering the agent's numbered questions. Each option is cleaned
+    like a single suggestion; one that fails is dropped on its own, and NULL
+    first means no suggestion at all."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     if not lines:
         return [], "empty"
-    if len(lines) > 1 and lines[0].endswith(":") and all(_LIST_MARKER.match(line) for line in lines[1:]):
-        lines = lines[1:]  # "Options:" heading over the list
-    if len(lines) > 1 and all(_LIST_MARKER.match(line) for line in lines):
-        items = [_LIST_MARKER.sub("", line, count=1) for line in lines]
+    if len(lines) > 1 and lines[0].endswith(":") and all(
+        _OPTION_MARKER.match(line) or _NUMBERED.match(line) for line in lines[1:]
+    ):
+        lines = lines[1:]  # "Options:" / "Answers:" heading over the list
+    if len(lines) > 1 and all(_NUMBERED.match(line) for line in lines):
+        message, reason = _numbered_answers(lines)
+        return ([message], "") if message else ([], reason)
+    if len(lines) > 1 and all(_OPTION_MARKER.match(line) for line in lines):
+        items = [_OPTION_MARKER.sub("", line, count=1) for line in lines]
     else:
-        items = [re.sub(r"^[-*•]\s+", "", lines[0], count=1)]
+        items = [_OPTION_MARKER.sub("", lines[0], count=1)]
     options: list = []
     seen: set = set()
     first_reason = ""
@@ -372,7 +407,7 @@ def _generate_from_context(session_id: str, seq: int, context: str, last_user: s
         kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
             messages=_prompt_messages(context, last_user),
-            max_tokens=160,
+            max_tokens=200,
             temperature=0.3,
             purpose="next-prompt suggestion",
             **kwargs,

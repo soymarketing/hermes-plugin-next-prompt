@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.6
 
 - **One pill per option when the agent offers a choice.** When the agent's
   last message names options and asks which one ("staging first, or straight
@@ -17,6 +17,12 @@
   when every option is in, or with its ×. ⌘/Ctrl-click still sends one
   option at once. Without the composer API (older Desktop) a click copies
   that option, as before.
+- **Several questions, every one answered.** When the agent asks several
+  separate questions, the pill answers each in order, a short sentence
+  apiece (up to about 50 characters per question instead of 80 for the
+  whole reply). When the agent numbered its questions, the answers come
+  numbered the same way, one per line, so you can change one in place.
+  Numbered lines are one reply, never separate options.
 - **API:** the suggestion payload adds `options` (every reply to show, `text`
   first). `text` is unchanged, so one-pill clients keep working. Stores from
   0.3.5 gain the column in place.

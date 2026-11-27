@@ -9,6 +9,8 @@ under the composer:
 - **When the agent offers a choice** ("staging first, or straight to
   production?"), you get one pill per option, up to three, the one the
   conversation favours first.
+- **When the agent asks several questions**, the pill answers every one, in
+  order; numbered the same way, one per line, when the agent numbered them.
 - **Otherwise**, it is the natural next step: verify it, apply it elsewhere,
   dig into a detail.
 
