@@ -8,20 +8,22 @@ its hooks) run in the gateway. Memory is not shared between them, so this
 SQLite file in the plugin's data directory is the only state both halves
 read and write. WAL lets one process read while the other writes.
 
-One row per session in ``pending``: the pending suggestion, or the reason the
-last one could not be generated. ``turns`` keeps each session's last trimmed
+One row per session in ``pending``: the pending suggestion (``text``, plus up
+to two ``alternatives`` as a JSON list when the agent offered a choice), or
+the reason the last one could not be generated. ``turns`` keeps each session's last trimmed
 context, so "generate suggestion" also works after a restart. Both halves load this file by path (the host imports
 ``plugin_api.py`` with no package), so it holds no state of its own.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -110,22 +112,46 @@ def _connect() -> Optional[sqlite3.Connection]:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_SCHEMA)
         conn.execute(_TURNS_SCHEMA)
+        _add_alternatives_column(conn)
         return conn
     except Exception as exc:
         logger.warning("next-prompt: could not open %s: %s", DB_FILE, exc)
         return None
 
 
-def _write(session_id: str, kind: str, text: Optional[str], failure: Optional[str]) -> Optional[float]:
+def _add_alternatives_column(conn: sqlite3.Connection) -> None:
+    """Stores from 0.3.5 and earlier have no ``alternatives`` column."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pending)")}
+    if "alternatives" in columns:
+        return
+    try:
+        conn.execute("ALTER TABLE pending ADD COLUMN alternatives TEXT")
+    except sqlite3.OperationalError:
+        pass  # the other process added it first
+
+
+def _alternatives(raw: Optional[str]) -> List[str]:
+    try:
+        value = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+
+
+def _write(
+    session_id: str, kind: str, text: Optional[str], failure: Optional[str], alternatives: Sequence[str] = ()
+) -> Optional[float]:
     conn = _connect()
     if conn is None:
         return None
     now = time.time()
+    extra = json.dumps(list(alternatives), ensure_ascii=False) if alternatives else None
     try:
         with closing(conn), conn:
             conn.execute(
-                "INSERT OR REPLACE INTO pending (session_id, kind, text, failure, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (session_id, kind, text, failure, now),
+                "INSERT OR REPLACE INTO pending (session_id, kind, text, failure, timestamp, alternatives) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, kind, text, failure, now, extra),
             )
             conn.execute(
                 "DELETE FROM pending WHERE (kind = 'suggestion' AND timestamp < ?) OR (kind != 'suggestion' AND timestamp < ?)",
@@ -142,12 +168,22 @@ def _write(session_id: str, kind: str, text: Optional[str], failure: Optional[st
     return now
 
 
-def put_suggestion(session_id: str, text: str) -> Optional[Dict[str, Any]]:
-    """Store the session's pending suggestion, replacing whatever it had."""
-    timestamp = _write(session_id, "suggestion", text, None)
+def put_suggestion(session_id: str, text: str, alternatives: Sequence[str] = ()) -> Optional[Dict[str, Any]]:
+    """Store the session's pending suggestion, replacing whatever it had.
+
+    ``text`` is the most likely reply; ``alternatives`` the other options the
+    agent offered, in order."""
+    alternatives = [item for item in alternatives if item and item != text]
+    timestamp = _write(session_id, "suggestion", text, None, alternatives)
     if timestamp is None:
         return None
-    return {"text": text, "session_id": session_id, "timestamp": timestamp}
+    return _suggestion(session_id, text, alternatives, timestamp)
+
+
+def _suggestion(session_id: str, text: str, alternatives: Sequence[str], timestamp: float) -> Dict[str, Any]:
+    # ``text`` stays the most likely reply for clients that show one pill;
+    # ``options`` is every reply to show, ``text`` first.
+    return {"text": text, "options": [text, *alternatives], "session_id": session_id, "timestamp": timestamp}
 
 
 def put_failure(session_id: str, kind: str) -> None:
@@ -178,17 +214,17 @@ def get(session_id: str) -> Dict[str, Optional[Dict[str, Any]]]:
     try:
         with closing(conn):
             row = conn.execute(
-                "SELECT kind, text, failure, timestamp FROM pending WHERE session_id = ?", (session_id,)
+                "SELECT kind, text, failure, timestamp, alternatives FROM pending WHERE session_id = ?", (session_id,)
             ).fetchone()
     except sqlite3.Error as exc:
         logger.warning("next-prompt: could not read %s: %s", session_id, exc)
         return empty
     if not row:
         return empty
-    kind, text, failure, timestamp = row
+    kind, text, failure, timestamp, alternatives = row
     age = time.time() - float(timestamp or 0)
     if kind == "suggestion" and text and age < SUGGESTION_TTL_SECONDS:
-        return {"suggestion": {"text": text, "session_id": session_id, "timestamp": timestamp}, "error": None}
+        return {"suggestion": _suggestion(session_id, text, _alternatives(alternatives), timestamp), "error": None}
     if kind == "failure" and failure and age < FAILURE_TTL_SECONDS:
         return {"suggestion": None, "error": {"kind": failure, "session_id": session_id, "timestamp": timestamp}}
     return empty

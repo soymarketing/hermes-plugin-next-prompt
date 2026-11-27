@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **One pill per option when the agent offers a choice.** When the agent's
+  last message names options and asks which one ("staging first, or straight
+  to production?", "which of these three first?"), you get up to three
+  pills, the one the conversation favours or the agent recommends first. Each
+  is a complete reply; the shortcut and the palette use the first, and using
+  any of them clears the row. Yes/no offers and single questions still get
+  one pill. Measured on 11 conversations (Claude Sonnet 5.5 and GPT-6.1
+  Terra): every choice got 2–3 options; every yes/no offer, finished
+  task and no-suggestion case still got one pill or none.
+- **API:** the suggestion payload adds `options` (every reply to show, `text`
+  first). `text` is unchanged, so one-pill clients keep working. Stores from
+  0.3.5 gain the column in place.
+
 ## 0.3.5
 
 - **"Next Prompt: generate suggestion" now works on a standard install.** In

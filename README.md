@@ -6,6 +6,9 @@ under the composer:
 
 - **When the agent asks you something**, the pill is the answer you would most
   likely give, committed to one option.
+- **When the agent offers a choice** ("staging first, or straight to
+  production?"), you get one pill per option, up to three, the one the
+  conversation favours first.
 - **Otherwise**, it is the natural next step: verify it, apply it elsewhere,
   dig into a detail.
 
@@ -49,6 +52,9 @@ or *dismiss suggestion*:
   palette command still only fill the composer; nothing is sent unless you
   hold the modifier. If the host cannot submit, it falls back to filling the
   composer.
+- **When the agent offered a choice**, each option is its own pill; the most
+  likely one comes first with the sparkle, and the shortcut and the palette
+  use it. Using any option clears the row, and one × dismisses them all.
 - **Click ×** to dismiss it. Sending your own message clears it too.
 - **No pill, or not the one you wanted?** Ctrl/⌘+K → *Next Prompt: generate
   suggestion* asks for a new one from the chat's last turn, without sending a
@@ -159,7 +165,10 @@ plugins:
    they share.
 3. **Desktop half.** Reads the suggestion through the plugin's REST route
    (`ctx.rest` → `/api/plugins/next-prompt/suggestion`) and renders it in the
-   `composer.underside` area.
+   `composer.underside` area. The payload is
+   `{"suggestion": {"text", "options", "session_id", "timestamp"}, "error"}`:
+   `text` is the most likely reply and `options` every reply to show, `text`
+   first (one item unless the agent offered a choice).
 
 ### Design notes
 
@@ -172,13 +181,15 @@ plugins:
   silently.
 - **Poll, not push.** `ctx.socket` is a no-op on OAuth remote backends, so the
   desktop half polls (every 2 s right after a turn, every 20 s otherwise).
-- **One answer, never a menu.** When the agent ends with a question, a choice
-  or a yes/no offer, the suggestion commits to the option the conversation or
-  the agent favours, or says yes to a proposal that matches your request.
+- **Each pill is one answer, never a menu.** When the agent ends with a
+  question or a yes/no offer, the suggestion commits to the option the
+  conversation or the agent favours, or says yes to a proposal that matches
+  your request. When it offers a real choice between options it named, each
+  option gets its own pill, so picking one is a click rather than an edit.
   Asked to try something and report back, it confirms you did it with the
-  most likely outcome. It never offers a list of options or a blank to fill
-  in, since deleting options is as much work as typing; a suggestion that
-  comes back with brackets anyway is dropped. When the answer is a detail only
+  most likely outcome. A pill never holds a list of options or a blank to
+  fill in, since deleting options is as much work as typing; a suggestion
+  that comes back with brackets anyway is dropped. When the answer is a detail only
   you know (an email address), it shows nothing. It never includes a password.
 - **Your language.** The suggestion follows the language of your last
   message, not the topic's.

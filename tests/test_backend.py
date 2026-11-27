@@ -152,6 +152,35 @@ class GenerationTests(PluginTestCase):
         self.assertEqual(set(ctx.hooks), {"pre_llm_call", "post_llm_call"})
         self.assertEqual([key for key, _ in ctx.aux_tasks], ["next_prompt"])
 
+    def test_a_choice_is_stored_with_its_options(self):
+        module, ctx = self.start(FakeLLM(text="- Deploy to staging first\n- Go straight to production"))
+        self.turn_done(ctx, "s-choice")
+        self.assertTrue(wait_for(lambda: self.has("s-choice")))
+        stored = self.suggestion("s-choice")
+        self.assertEqual(stored["text"], "Deploy to staging first")
+        self.assertEqual(stored["options"], ["Deploy to staging first", "Go straight to production"])
+
+    def test_a_single_suggestion_has_one_option(self):
+        module, ctx = self.start()
+        self.turn_done(ctx, "s-one")
+        self.assertTrue(wait_for(lambda: self.has("s-one")))
+        self.assertEqual(self.suggestion("s-one")["options"], ["Haz el deploy a producción"])
+
+    def test_a_store_from_before_options_is_upgraded_in_place(self):
+        path = self.db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "CREATE TABLE pending (session_id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT, failure TEXT, timestamp REAL NOT NULL)"
+        )
+        conn.execute("INSERT INTO pending VALUES ('old', 'suggestion', 'Pending from 0.3.5', NULL, ?)", (time.time(),))
+        conn.commit()
+        conn.close()
+        self.start()
+        self.assertEqual(self.suggestion("old")["options"], ["Pending from 0.3.5"])
+        self.store.put_suggestion("new", "Uno", ["Dos"])
+        self.assertEqual(self.suggestion("new")["options"], ["Uno", "Dos"])
+
     def test_generates_and_persists(self):
         module, ctx = self.start()
         self.turn_done(ctx, "s1")
@@ -422,6 +451,29 @@ class ContextAndCleanTests(unittest.TestCase):
             with self.subTest(raw=raw[:40]):
                 self.assertEqual(self.m._clean(raw), expected)
 
+    def test_parse_options(self):
+        cases = [
+            ("Run the tests", ["Run the tests"]),
+            ("- Run the tests", ["Run the tests"]),
+            # A second unmarked line is the model explaining itself, not an option.
+            ("Run the tests\nBecause the fix touched auth.py", ["Run the tests"]),
+            ("- Deploy to staging first\n- Go straight to production", ["Deploy to staging first", "Go straight to production"]),
+            ("1. Empieza por las imágenes\n2. Empieza por el plugin\n3. Empieza por la caché",
+             ["Empieza por las imágenes", "Empieza por el plugin", "Empieza por la caché"]),
+            ("Options:\n- Uno sí\n- Dos sí", ["Uno sí", "Dos sí"]),
+            ("- A uno\n- B dos\n- C tres\n- D cuatro", ["A uno", "B dos", "C tres"]),
+            ("- Same thing\n- same thing", ["Same thing"]),
+            # A bad option drops on its own; the rest survive.
+            ("- Send it to [email]\n- Keep it as a draft", ["Keep it as a draft"]),
+            ("- NULL\n- Something", []),
+            ("NULL", []),
+            ("", []),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw[:40]):
+                self.assertEqual(self.m._parse_options(raw)[0], expected)
+        self.assertEqual(self.m._parse_options("- [a]\n- <b>"), ([], "fill_in_placeholder"))
+
     def test_clean_with_reason_reports_drop_causes(self):
         self.assertEqual(self.m._clean_with_reason(""), ("", "empty"))
         self.assertEqual(self.m._clean_with_reason("NULL"), ("", "null_answer"))
@@ -548,6 +600,13 @@ class RestApiTests(PluginTestCase):
         body = self.get("s6")
         self.assertEqual(body["suggestion"]["text"], "ok")
         self.assertIsNone(body["error"])
+
+    def test_options_reach_the_api(self):
+        self.start()
+        self.store.put_suggestion("s-api", "Make the phone field optional", ["Run an A/B test first"])
+        body = self.get("s-api")["suggestion"]
+        self.assertEqual(body["text"], "Make the phone field optional")
+        self.assertEqual(body["options"], ["Make the phone field optional", "Run an A/B test first"])
 
     def test_missing_or_blank_session(self):
         self.assertEqual(self.get("missing"), {"suggestion": None, "error": None})

@@ -1,7 +1,8 @@
 """Next Prompt — AI-generated follow-up suggestions for Hermes.
 
-After each completed turn the plugin asks the host LLM for one short
-follow-up the user might send next and keeps it per session until the user
+After each completed turn the plugin asks the host LLM for the short
+follow-up the user will most likely send next (up to three when the agent
+offered a choice) and keeps it per session until the user
 uses it, dismisses it, or sends their own next message (``pre_llm_call``).
 Suggestions live in ``store.py``'s SQLite file under the profile's
 plugin-data dir: the desktop half reads them through
@@ -143,6 +144,14 @@ outcome; the user corrects it if it went differently. When the agent asked \
 for several things (to confirm a step and to decide something), cover each \
 briefly, the confirmation first.
 
+When the agent offers a real choice between distinct options (it names them \
+and asks which one: two deploy targets, which task to tackle first), write \
+one reply per option the user might pick, up to 3, one per line, each line \
+starting with "- ": the option the conversation favours or the agent \
+recommends first. Each line is a complete message the user could send on its \
+own. Only list options the agent named. A yes/no offer, or a question with \
+one obvious answer, still gets a single reply.
+
 Otherwise suggest the natural next step: verify or test what was just done, \
 apply it somewhere related, drill into a detail the agent surfaced, or move \
 to the next pending item the agent mentioned.
@@ -157,23 +166,31 @@ and a blank saves nothing.
 Writing rules:
 - Write in the language of the user's last message, whatever the language \
 of the topic, the names in it, or these instructions.
-- One short message under 80 characters, phrased the way the user writes to \
-the agent: a reply to the agent's question, or a request (usually imperative).
-- Ready to send as is: no brackets, blanks, placeholders or lists of \
-alternatives ("X / Y", "X or Y?"). Deleting the options that don't apply is \
-as much work as typing the message.
+- Each message short, under 80 characters, phrased the way the user writes \
+to the agent: a reply to the agent's question, or a request (usually \
+imperative).
+- Each message ready to send as is: no brackets, blanks, placeholders or \
+alternatives inside one message ("X / Y", "X or Y?"). Deleting the options \
+that don't apply is as much work as typing the message.
 - Specific to this conversation: use its names, files and numbers. Never \
 generic ("Continue", "Tell me more", "Sounds good", "Thanks, looks good"): \
 when the work is done, suggest how to verify, ship or extend it.
 - Never ask for something the agent already did or already answered.
 - Never include a password or other secret.
-- Output only the suggestion, or NULL. No quotes, labels or explanation.
+- Output only the suggestion (or the list of replies), or NULL. No quotes, \
+labels or explanation.
 
 Examples (the language always follows the user, never the example):
 User: "Fix the parser crash" Agent: "Fixed the null check in parser.py; all 42 tests pass." -> Commit the parser.py fix
 User: "Compare our two hosting plans" Agent: "Plan B is 30% cheaper but has half the bandwidth." -> How much bandwidth did we use last month?
 User: "Resume las ventas de agosto" Agent: "312 pedidos; Monterrey cayó 18%." -> ¿Por qué cayeron las ventas en Monterrey?
-User: "Deploy the site" Agent: "Build is ready. Staging first, or straight to production? I'd go staging." -> Deploy to staging first
+User: "Deploy the site" Agent: "Build is ready. Staging first, or straight to production? I'd go staging." ->
+- Deploy to staging first
+- Go straight to production
+User: "What's left?" Agent: "Three things are open: the login bug, the CSV export and the docs. Which one first?" ->
+- Start with the login bug
+- Do the CSV export first
+- Update the docs first
 User: "Email the report to the team" Agent: "Want me to attach the Q3 chart too?" -> Yes, attach the Q3 chart
 User: "The export button does nothing" Agent: "Fixed. Restart the app and tell me if it works." -> Restarted it, and the export button works now
 User: "Send the invoice" Agent: "I don't have the client's email. Which address?" -> NULL
@@ -212,6 +229,9 @@ def _prompt_messages(context: str, last_user: str = "") -> list:
 _HEAD_CHARS = 300
 _TAIL_CHARS = 900
 _MAX_SUGGESTION_CHARS = 220
+# A real choice gets one pill per option the agent offered, most likely first.
+_MAX_OPTIONS = 3
+_LIST_MARKER = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
 _NULL_ANSWERS = frozenset({"NULL", "NONE", "N/A", "NO SUGGESTION"})
 _LABELS = ("suggestion:", "suggested prompt:", "next prompt:", "prompt:", "sugerencia:", "user:", "[user]:")
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "«": "»", "`": "`"}
@@ -305,6 +325,43 @@ def _clean(text: str) -> str:
     return cleaned
 
 
+def _parse_options(text: str) -> tuple[list, str]:
+    """The replies to show, most likely first, or ``([], reason)``.
+
+    Several replies only when the model wrote a list (every line marked "- ",
+    "* " or "1."): a second unmarked line is an explanation the model added,
+    never an option. Each item is cleaned like a single suggestion; one that
+    fails is dropped on its own, and NULL first means no suggestion at all."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return [], "empty"
+    if len(lines) > 1 and lines[0].endswith(":") and all(_LIST_MARKER.match(line) for line in lines[1:]):
+        lines = lines[1:]  # "Options:" heading over the list
+    if len(lines) > 1 and all(_LIST_MARKER.match(line) for line in lines):
+        items = [_LIST_MARKER.sub("", line, count=1) for line in lines]
+    else:
+        items = [re.sub(r"^[-*•]\s+", "", lines[0], count=1)]
+    options: list = []
+    seen: set = set()
+    first_reason = ""
+    for index, item in enumerate(items):
+        cleaned, reason = _clean_with_reason(item)
+        if index == 0 and reason == "null_answer":
+            return [], reason
+        if not cleaned:
+            first_reason = first_reason or reason
+            continue
+        key = cleaned.casefold()
+        if key not in seen:
+            seen.add(key)
+            options.append(cleaned)
+        if len(options) == _MAX_OPTIONS:
+            break
+    if not options:
+        return [], first_reason or "empty"
+    return options, ""
+
+
 def _generate_from_context(session_id: str, seq: int, context: str, last_user: str) -> None:
     if not context.strip():
         return
@@ -315,12 +372,12 @@ def _generate_from_context(session_id: str, seq: int, context: str, last_user: s
         kwargs = {"task": _llm_task} if _llm_task else {}
         result = llm.complete(
             messages=_prompt_messages(context, last_user),
-            max_tokens=100,
+            max_tokens=160,
             temperature=0.3,
             purpose="next-prompt suggestion",
             **kwargs,
         )
-        text, drop_reason = _clean_with_reason(getattr(result, "text", ""))
+        options, drop_reason = _parse_options(getattr(result, "text", ""))
     except Exception as exc:
         logger.warning("next-prompt: suggestion generation failed for %s", session_id, exc_info=True)
         with _lock:
@@ -333,11 +390,11 @@ def _generate_from_context(session_id: str, seq: int, context: str, last_user: s
     with _lock:
         if _turn_seq.get(session_id, 0) != seq:
             return  # the user already moved on; this suggestion is stale
-        if not text:
+        if not options:
             store.clear(session_id)
             logger.info("next-prompt: dropped suggestion for %s (reason=%s)", session_id, drop_reason)
             return
-        suggestion = store.put_suggestion(session_id, text)
+        suggestion = store.put_suggestion(session_id, options[0], options[1:])
         if suggestion is None:
             return
         _last_suggestion_time[session_id] = suggestion["timestamp"]

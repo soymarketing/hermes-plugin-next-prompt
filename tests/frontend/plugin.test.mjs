@@ -251,6 +251,76 @@ test('the failure note is hidden while the chat works', async () => {
   assert.equal(note(), null)
 })
 
+// ── a choice: one pill per option ─────────────────────────────────────────
+
+const choice = (session_id, options) => ({ text: options[0], options, session_id, timestamp: ++stamp })
+function findAll(node, pred, out = []) {
+  if (node == null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    for (const n of node) findAll(n, pred, out)
+    return out
+  }
+  if (pred(node)) out.push(node)
+  return findAll(node.props?.children, pred, out)
+}
+const choiceButtons = () => findAll(render(), n => n.type === 'button' && n.props?.['aria-label'] !== 'dismiss')
+const choiceTexts = () => choiceButtons().map(b => textOf(b).trim())
+
+test('a choice shows one pill per option, the likely one first', () => {
+  view('A')
+  serve('A', choice('A', ['Deploy to staging first', 'Go straight to production']))
+  assert.deepEqual(choiceTexts(), ['Deploy to staging first', 'Go straight to production'])
+})
+
+test('never more than three options, and blanks are skipped', () => {
+  view('A')
+  serve('A', choice('A', ['Uno', '', 'Dos', 'Tres', 'Cuatro']))
+  assert.deepEqual(choiceTexts(), ['Uno', 'Dos', 'Tres'])
+})
+
+test('a single option, or a backend without options, keeps the one-pill look', () => {
+  view('A')
+  serve('A', choice('A', ['Solo una']))
+  assert.deepEqual(choiceTexts(), ['Solo una'])
+  serve('A', suggestion('A', 'Sin lista'))
+  assert.deepEqual(choiceTexts(), ['Sin lista'])
+})
+
+test('clicking another option inserts that option and settles the whole row', async () => {
+  resetCalls()
+  host.composer = { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) }
+  view('A')
+  serve('A', choice('A', ['Empieza por las imágenes', 'Empieza por el plugin de chat', 'Empieza por la caché']))
+  await choiceButtons()[1].props.onClick()
+  assert.deepEqual(calls.insert, [[null, 'Empieza por el plugin de chat', { mode: 'block' }]])
+  assert.deepEqual(choiceTexts(), [], 'every option disappears once one is used')
+  assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+  delete host.composer
+})
+
+test('⌘/Ctrl-click on an option sends that option', async () => {
+  resetCalls()
+  const sent = []
+  host.composer = {
+    insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true),
+    submit: (sid, text) => (sent.push([sid, text]), true)
+  }
+  view('A')
+  serve('A', choice('A', ['Make the phone field optional', 'Run an A/B test first']))
+  await choiceButtons()[1].props.onClick({ ctrlKey: true })
+  assert.deepEqual(sent, [['A', 'Run an A/B test first']])
+  assert.deepEqual(calls.insert, [])
+  delete host.composer
+})
+
+test('the row’s × dismisses every option', () => {
+  view('A')
+  serve('A', choice('A', ['Opción uno', 'Opción dos']))
+  find(render(), n => n.props?.['aria-label'] === 'dismiss').props.onClick()
+  assert.deepEqual(choiceTexts(), [])
+  assert.deepEqual(ctx.restCalls.at(-1), ['/dismiss?session_id=A', 'POST'])
+})
+
 // ── keybind + palette ─────────────────────────────────────────────────────
 
 const byArea = area => ctx.contributions.filter(c => c.area === area).map(c => c.data)
@@ -288,6 +358,19 @@ test('the keybind uses the suggestion shown in the focused chat', async () => {
   await sleep(1)
   assert.deepEqual(calls.insert, [[null, 'Por atajo', { mode: 'block' }]])
   assert.equal(pillText(), null, 'used suggestion disappears')
+  delete host.composer
+})
+
+test('with a choice, the keybind and the palette take the most likely option', async () => {
+  resetCalls()
+  host.composer = { insertText: async (sid, text, opts) => (calls.insert.push([sid, text, opts]), true) }
+  view('A')
+  serve('A', choice('A', ['La probable', 'La otra']))
+  render()
+  assert.equal(command('next-prompt.use').detail(), 'La probable')
+  keybind().run()
+  await sleep(1)
+  assert.deepEqual(calls.insert, [[null, 'La probable', { mode: 'block' }]])
   delete host.composer
 })
 

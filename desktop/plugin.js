@@ -3,7 +3,8 @@
  *
  * After a turn finishes, polls this plugin's Python backend (through
  * `ctx.rest`, which routes to the right backend and carries auth) for an
- * AI-generated follow-up and shows it as a subtle pill below the composer.
+ * AI-generated follow-up and shows it as a subtle pill below the composer
+ * (one pill per option, up to three, when the agent offered a choice).
  * Click → the text goes into the composer (not sent) through the SDK's
  * `host.composer`, or to the clipboard on hosts without it. ⌘/Ctrl-click sends
  * it straight away through `host.composer.submit`. × → dismiss.
@@ -34,6 +35,7 @@ const FAST_POLL_MS = 2000
 const SLOW_POLL_MS = 20000
 const FAST_WINDOW_MS = 45000
 const FAILURE_KINDS = new Set(['auth', 'unavailable', 'rate_limit', 'timeout', 'other'])
+const MAX_OPTIONS = 3
 // Unused by the app, its editors and the OS menus; a primary-modifier chord
 // also fires while typing in the composer. Rebindable in Settings → Keybinds;
 // the palette row shows the live binding.
@@ -95,8 +97,18 @@ function sendFromComposer(storedId, text) {
 /** ⌘-click (Mac) or Ctrl-click (elsewhere) on the pill. */
 const wantsSend = event => Boolean(event && (event.metaKey || event.ctrlKey))
 
-async function useSuggestion(entry, { send = false } = {}) {
-  const text = entry.suggestion.text
+/** Every reply to show, most likely first. Backends before 0.3.6 send only
+ *  `text`. */
+function optionsOf(suggestion) {
+  const listed = Array.isArray(suggestion.options)
+    ? suggestion.options.filter(item => typeof item === 'string' && item.trim())
+    : []
+  return (listed.length ? listed : [suggestion.text]).slice(0, MAX_OPTIONS)
+}
+
+/** Use one reply: `text` picks an option; the keybind and palette take the
+ *  most likely one. Using any option settles the whole set. */
+async function useSuggestion(entry, { send = false, text = entry.suggestion.text } = {}) {
   finish(entry)
   // If sending is unavailable, fall back to the normal insert so nothing is lost.
   if (send && sendFromComposer(entry.storedId, text)) return
@@ -213,6 +225,55 @@ function SuggestionPill({ storedId, suggestion, handledKey }) {
   })
 }
 
+const choiceClass = cn(
+  'flex min-w-0 max-w-full items-center gap-1.5 rounded-full',
+  'border border-(--ui-stroke-secondary) px-3 py-1',
+  'text-[0.8125rem] text-(--ui-text-secondary)',
+  'transition-colors duration-150 hover:border-(--ui-accent) hover:text-(--ui-accent)'
+)
+
+/** The agent offered a choice: one pill per option, the likely one first and
+ *  marked, and one × for the whole row. */
+function SuggestionChoices({ storedId, suggestion, handledKey, options }) {
+  const t = usePluginI18n(ID)
+  const entry = { storedId, suggestion, handledKey }
+
+  const choice = (text, index) =>
+    jsx(
+      Tip,
+      {
+        label: t('tip'),
+        children: jsxs('button', {
+          type: 'button',
+          className: choiceClass,
+          onClick: event => {
+            haptic('tap')
+            return useSuggestion(entry, { send: wantsSend(event), text })
+          },
+          children: [
+            index === 0 ? jsx(Codicon, { name: 'sparkle', className: 'shrink-0 text-[0.75rem] opacity-70' }) : null,
+            jsx('span', { className: 'truncate', children: text })
+          ]
+        })
+      },
+      `${index}:${text}`
+    )
+
+  return jsxs('div', {
+    className: cn(rowClass, 'flex-wrap gap-1.5'),
+    children: [
+      ...options.map(choice),
+      jsx('button', {
+        type: 'button',
+        'aria-label': t('dismiss'),
+        className: closeClass,
+        onClick: () => finish(entry),
+        children: jsx(Codicon, { name: 'close', className: 'text-[0.625rem]' })
+      })
+    ]
+  })
+}
+
 /** Muted, dismissible note in the pill's place when generation failed. */
 function FailureNote({ storedId, failure, handledKey }) {
   const t = usePluginI18n(ID)
@@ -287,6 +348,8 @@ function SuggestionStrip() {
     const handledKey = `${storedId}:suggestion:${suggestion.timestamp}`
     if (handled === handledKey) return null
     visible = { storedId, suggestion, handledKey }
+    const options = optionsOf(suggestion)
+    if (options.length > 1) return jsx(SuggestionChoices, { storedId, suggestion, handledKey, options })
     return jsx(SuggestionPill, { storedId, suggestion, handledKey })
   }
 
