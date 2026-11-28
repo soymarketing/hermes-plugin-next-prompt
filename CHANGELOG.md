@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.7
 
 - **"Generate suggestion" works on a dashboard backend.** Desktop connected
   to a `hermes dashboard` (no gateway session authority) has no plugin RPC,
